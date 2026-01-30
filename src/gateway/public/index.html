@@ -18,15 +18,16 @@
       --bg: #0f172a;
       --surface: #1e293b;
       --surface-2: #334155;
-      --border: #334155;
+      --border: rgba(148,163,184,0.08);
       --text: #f1f5f9;
       --text-dim: #94a3b8;
       --text-muted: #64748b;
       --accent: #6366f1;
-      --accent-glow: rgba(99,102,241,0.15);
-      --green: #22c55e;
-      --yellow: #eab308;
-      --red: #ef4444;
+      --accent-light: #818cf8;
+      --accent-glow: rgba(99,102,241,0.12);
+      --green: #34d399;
+      --yellow: #fbbf24;
+      --red: #f87171;
       --safe-top: env(safe-area-inset-top, 0px);
       --safe-bottom: env(safe-area-inset-bottom, 0px);
     }
@@ -42,94 +43,171 @@
       overflow: hidden;
     }
 
-    /* Header */
+    /* ── Header ── */
     .header {
-      padding: calc(var(--safe-top) + 12px) 16px 12px;
-      background: var(--surface);
+      padding: calc(var(--safe-top) + 14px) 20px 14px;
+      background: linear-gradient(180deg, #1e293b 0%, rgba(30,41,59,0.95) 100%);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
       border-bottom: 1px solid var(--border);
       flex-shrink: 0;
+      z-index: 10;
     }
     .header-row {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      gap: 12px;
     }
+    .header-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+    .header-logo {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      flex-shrink: 0;
+    }
+    .header-info { min-width: 0; }
     .header h1 {
-      font-size: 1.1rem;
+      font-size: 1.05rem;
       font-weight: 700;
       letter-spacing: -0.02em;
+      line-height: 1.2;
+    }
+    .device-label {
+      font-size: 0.68rem;
+      color: var(--text-muted);
+      margin-top: 1px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-family: "SF Mono", "Fira Code", monospace;
+      cursor: pointer;
+    }
+    .header-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
     }
     .status-pill {
       display: flex;
       align-items: center;
       gap: 6px;
-      font-size: 0.75rem;
+      font-size: 0.72rem;
+      font-weight: 500;
       color: var(--text-dim);
-      background: var(--bg);
-      padding: 4px 10px;
+      background: rgba(15,23,42,0.6);
+      padding: 5px 10px;
       border-radius: 20px;
+      border: 1px solid var(--border);
     }
     .status-dot {
-      width: 8px;
-      height: 8px;
+      width: 7px;
+      height: 7px;
       border-radius: 50%;
       background: var(--text-muted);
-      transition: background 0.3s;
+      transition: background 0.3s, box-shadow 0.3s;
     }
-    .status-dot.on { background: var(--green); box-shadow: 0 0 8px rgba(34,197,94,0.5); }
-    .status-dot.connecting { background: var(--yellow); }
-    .device-label {
-      font-size: 0.7rem;
-      color: var(--text-muted);
-      margin-top: 6px;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
+    .status-dot.on {
+      background: var(--green);
+      box-shadow: 0 0 6px rgba(52,211,153,0.6);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    .status-dot.connecting {
+      background: var(--yellow);
+      animation: blink 1s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { box-shadow: 0 0 6px rgba(52,211,153,0.6); }
+      50% { box-shadow: 0 0 12px rgba(52,211,153,0.9); }
+    }
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
     }
 
-    /* Content area */
-    .content {
+    /* Disconnect button in header */
+    .btn-disconnect {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 10px;
+      border: 1px solid rgba(248,113,113,0.2);
+      background: rgba(248,113,113,0.1);
+      color: var(--red);
+      cursor: pointer;
+      transition: transform 0.1s, background 0.2s;
+      flex-shrink: 0;
+    }
+    .btn-disconnect:active { transform: scale(0.9); }
+    .btn-disconnect.visible { display: flex; }
+
+    /* ── Setup Screen ── */
+    .setup-screen {
       flex: 1;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
     }
-
-    /* Cards */
-    .card {
-      margin: 12px;
+    .setup-card {
+      width: 100%;
+      max-width: 400px;
       background: var(--surface);
-      border-radius: 16px;
-      padding: 16px;
+      border-radius: 20px;
+      padding: 28px 24px;
       border: 1px solid var(--border);
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
     }
-    .card-title {
-      font-size: 0.75rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
+    .setup-header {
+      text-align: center;
+      margin-bottom: 28px;
+    }
+    .setup-header img {
+      width: 56px;
+      height: 56px;
+      border-radius: 14px;
+      margin-bottom: 14px;
+    }
+    .setup-header h2 {
+      font-size: 1.2rem;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+    .setup-header p {
+      font-size: 0.82rem;
       color: var(--text-muted);
-      margin-bottom: 12px;
     }
-
-    /* Inputs */
-    .input-group { margin-bottom: 12px; }
-    .input-group:last-child { margin-bottom: 0; }
+    .input-group { margin-bottom: 16px; }
     .input-label {
       display: block;
-      font-size: 0.75rem;
+      font-size: 0.72rem;
+      font-weight: 600;
       color: var(--text-dim);
-      margin-bottom: 4px;
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
     }
     input[type="text"] {
       width: 100%;
       background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 12px 14px;
+      border: 1px solid rgba(148,163,184,0.12);
+      border-radius: 12px;
+      padding: 13px 14px;
       color: var(--text);
-      font-size: 0.95rem;
+      font-size: 0.92rem;
       font-family: inherit;
-      transition: border-color 0.2s;
+      transition: border-color 0.2s, box-shadow 0.2s;
     }
     input[type="text"]:focus {
       outline: none;
@@ -138,149 +216,236 @@
     }
     input[type="text"]::placeholder { color: var(--text-muted); }
 
-    /* Buttons */
     .btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
       gap: 6px;
       width: 100%;
-      min-height: 48px;
+      min-height: 50px;
       border: none;
-      border-radius: 12px;
+      border-radius: 14px;
       font-size: 0.95rem;
       font-weight: 600;
       font-family: inherit;
       cursor: pointer;
-      transition: transform 0.1s, opacity 0.2s;
+      transition: transform 0.1s, opacity 0.2s, box-shadow 0.2s;
       -webkit-user-select: none;
       user-select: none;
     }
     .btn:active { transform: scale(0.97); }
     .btn:disabled { opacity: 0.4; pointer-events: none; }
     .btn-accent {
-      background: linear-gradient(135deg, #6366f1, #8b5cf6);
+      background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
       color: white;
-      box-shadow: 0 4px 12px rgba(99,102,241,0.3);
+      box-shadow: 0 4px 16px rgba(99,102,241,0.35);
     }
-    .btn-danger {
-      background: var(--surface-2);
-      color: var(--red);
-    }
-    .btn-send {
-      background: var(--accent);
-      color: white;
-      min-width: 48px;
-      width: 48px;
-      border-radius: 12px;
-      flex-shrink: 0;
+    .btn-accent:active {
+      box-shadow: 0 2px 8px rgba(99,102,241,0.25);
     }
 
-    /* Chat area */
+    /* ── Chat Screen ── */
     .chat-container {
       display: none;
       flex-direction: column;
       flex: 1;
       min-height: 0;
     }
-    .chat-container.active {
+    .chat-container.active { display: flex; }
+
+    /* Target bar as a collapsible strip */
+    .target-bar {
+      padding: 0 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease, padding 0.3s ease;
+      max-height: 0;
+    }
+    .target-bar.open {
+      max-height: 120px;
+      padding: 12px 16px;
+    }
+    .target-fields {
       display: flex;
+      gap: 8px;
+    }
+    .target-field {
+      flex: 1;
+      min-width: 0;
+    }
+    .target-field label {
+      display: block;
+      font-size: 0.65rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+    .target-field input {
+      width: 100%;
+      background: var(--bg);
+      border: 1px solid rgba(148,163,184,0.1);
+      border-radius: 10px;
+      padding: 9px 10px;
+      color: var(--text);
+      font-size: 0.8rem;
+      font-family: inherit;
+      transition: border-color 0.2s;
+    }
+    .target-field input:focus {
+      outline: none;
+      border-color: var(--accent);
     }
 
+    /* Toggle button for target bar */
+    .target-toggle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      padding: 6px 16px;
+      background: transparent;
+      border: none;
+      border-bottom: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 0.7rem;
+      font-weight: 500;
+      font-family: inherit;
+      cursor: pointer;
+      width: 100%;
+      flex-shrink: 0;
+      transition: color 0.2s;
+    }
+    .target-toggle:active { color: var(--accent-light); }
+    .target-toggle svg {
+      transition: transform 0.3s;
+    }
+    .target-toggle.open svg {
+      transform: rotate(180deg);
+    }
+
+    /* Messages */
     .messages {
       flex: 1;
       overflow-y: auto;
       -webkit-overflow-scrolling: touch;
-      padding: 12px;
+      padding: 16px;
     }
+    .msg-wrap {
+      display: flex;
+      flex-direction: column;
+      margin-bottom: 4px;
+    }
+    .msg-wrap + .msg-wrap { margin-top: 2px; }
+    .msg-wrap.self { align-items: flex-end; }
+    .msg-wrap.in { align-items: flex-start; }
+    .msg-wrap.system { align-items: center; margin-top: 8px; margin-bottom: 8px; }
+
     .msg {
-      max-width: 85%;
+      max-width: 82%;
       padding: 10px 14px;
-      border-radius: 16px;
-      margin-bottom: 6px;
+      border-radius: 18px;
       font-size: 0.9rem;
-      line-height: 1.4;
+      line-height: 1.45;
       word-break: break-word;
     }
     .msg-self {
-      background: linear-gradient(135deg, #6366f1, #7c3aed);
+      background: linear-gradient(135deg, #6366f1 0%, #7c3aed 100%);
       color: white;
-      margin-left: auto;
-      border-bottom-right-radius: 4px;
+      border-bottom-right-radius: 6px;
     }
     .msg-in {
       background: var(--surface);
       color: var(--text);
-      border-bottom-left-radius: 4px;
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 6px;
     }
     .msg-system {
-      background: transparent;
+      background: rgba(100,116,139,0.1);
       color: var(--text-muted);
-      font-size: 0.78rem;
-      text-align: center;
+      font-size: 0.72rem;
+      padding: 4px 12px;
+      border-radius: 12px;
       max-width: 100%;
-      padding: 4px 0;
     }
     .msg-from {
-      font-size: 0.7rem;
+      font-size: 0.68rem;
       color: var(--text-muted);
       margin-bottom: 2px;
+      padding-left: 4px;
     }
 
-    /* Target bar */
-    .target-bar {
-      padding: 8px 12px;
-      background: var(--surface);
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      gap: 8px;
-      flex-shrink: 0;
-    }
-    .target-bar input {
+    /* Empty state */
+    .empty-state {
       flex: 1;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 8px 10px;
-      color: var(--text);
-      font-size: 0.8rem;
-      font-family: inherit;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      gap: 8px;
+      padding: 40px;
     }
-    .target-bar input:focus {
-      outline: none;
-      border-color: var(--accent);
+    .empty-state svg { opacity: 0.3; }
+    .empty-state p {
+      font-size: 0.85rem;
+      text-align: center;
     }
 
     /* Compose bar */
     .compose {
       display: flex;
+      align-items: flex-end;
       gap: 8px;
       padding: 10px 12px calc(var(--safe-bottom) + 10px);
-      background: var(--surface);
+      background: linear-gradient(180deg, rgba(30,41,59,0.95) 0%, #1e293b 100%);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
       border-top: 1px solid var(--border);
       flex-shrink: 0;
     }
-    .compose input {
+    .compose-input-wrap {
       flex: 1;
+      position: relative;
+    }
+    .compose input {
+      width: 100%;
       background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 12px 14px;
+      border: 1px solid rgba(148,163,184,0.1);
+      border-radius: 22px;
+      padding: 12px 16px;
       color: var(--text);
       font-size: 0.95rem;
       font-family: inherit;
+      transition: border-color 0.2s, box-shadow 0.2s;
     }
     .compose input:focus {
       outline: none;
       border-color: var(--accent);
       box-shadow: 0 0 0 3px var(--accent-glow);
     }
-
-    /* Setup screen (shown when disconnected) */
-    .setup-screen {
-      flex: 1;
-      overflow-y: auto;
-      -webkit-overflow-scrolling: touch;
+    .compose input::placeholder { color: var(--text-muted); }
+    .btn-send {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 46px;
+      height: 46px;
+      border-radius: 50%;
+      border: none;
+      background: linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%);
+      color: white;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: transform 0.1s, box-shadow 0.2s;
+      box-shadow: 0 3px 12px rgba(99,102,241,0.35);
+    }
+    .btn-send:active {
+      transform: scale(0.9);
+      box-shadow: 0 1px 6px rgba(99,102,241,0.25);
     }
   </style>
 </head>
@@ -289,19 +454,33 @@
   <!-- Header -->
   <div class="header">
     <div class="header-row">
-      <h1>Geneva</h1>
-      <div class="status-pill">
-        <span class="status-dot" id="status-dot"></span>
-        <span id="status-text">Disconnected</span>
+      <div class="header-left">
+        <img src="icon.png" alt="Geneva" class="header-logo">
+        <div class="header-info">
+          <h1>Geneva</h1>
+          <div class="device-label" id="device-label" onclick="copyDeviceId()"></div>
+        </div>
+      </div>
+      <div class="header-right">
+        <div class="status-pill">
+          <span class="status-dot" id="status-dot"></span>
+          <span id="status-text">Disconnected</span>
+        </div>
+        <button class="btn-disconnect" id="btn-disconnect" onclick="doDisconnect()" title="Disconnect">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
+        </button>
       </div>
     </div>
-    <div class="device-label" id="device-label"></div>
   </div>
 
   <!-- Setup Screen -->
   <div class="setup-screen" id="setup-screen">
-    <div class="card">
-      <div class="card-title">Connection</div>
+    <div class="setup-card">
+      <div class="setup-header">
+        <img src="icon.png" alt="Geneva">
+        <h2>Geneva Client</h2>
+        <p>Connect to a Gateway to start messaging</p>
+      </div>
       <div class="input-group">
         <label class="input-label">Gateway URL</label>
         <input type="text" id="gateway-url" placeholder="http://localhost:3000">
@@ -312,22 +491,36 @@
 
   <!-- Chat Screen -->
   <div class="chat-container" id="chat-screen">
-    <div class="target-bar">
-      <input type="text" id="target-device-id" placeholder="Target Device ID">
-      <input type="text" id="target-agent-id" placeholder="Agent ID">
+    <button class="target-toggle" id="target-toggle" onclick="toggleTargetBar()">
+      <span id="target-toggle-label">Set target</span>
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="6 9 12 15 18 9"/></svg>
+    </button>
+    <div class="target-bar" id="target-bar">
+      <div class="target-fields">
+        <div class="target-field">
+          <label>Device ID</label>
+          <input type="text" id="target-device-id" placeholder="Target device">
+        </div>
+        <div class="target-field">
+          <label>Agent ID</label>
+          <input type="text" id="target-agent-id" placeholder="Agent">
+        </div>
+      </div>
     </div>
-    <div class="messages" id="messages"></div>
+    <div class="messages" id="messages">
+      <div class="empty-state" id="empty-state">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+        <p>Send a message to get started</p>
+      </div>
+    </div>
     <div class="compose">
-      <input type="text" id="msg-input" placeholder="Message..." onkeydown="if(event.key==='Enter')doSend()">
-      <button class="btn btn-send" onclick="doSend()">
+      <div class="compose-input-wrap">
+        <input type="text" id="msg-input" placeholder="Message..." onkeydown="if(event.key==='Enter')doSend()">
+      </div>
+      <button class="btn-send" onclick="doSend()">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
       </button>
     </div>
-  </div>
-
-  <!-- Disconnect floating button (visible when connected) -->
-  <div id="disconnect-fab" style="display:none; position:fixed; top:calc(var(--safe-top) + 56px); right:12px; z-index:10;">
-    <button class="btn btn-danger" style="width:auto; min-height:36px; padding:0 14px; font-size:0.8rem; border-radius:20px;" onclick="doDisconnect()">Disconnect</button>
   </div>
 
   <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"></script>
@@ -339,13 +532,24 @@
       deviceId = crypto.randomUUID();
       localStorage.setItem(STORAGE_KEY, deviceId);
     }
-    document.getElementById('device-label').textContent = 'Device: ' + deviceId;
+    document.getElementById('device-label').textContent = deviceId.slice(0, 8) + '...';
+    document.getElementById('device-label').title = deviceId;
+
+    function copyDeviceId() {
+      navigator.clipboard.writeText(deviceId).then(() => {
+        const el = document.getElementById('device-label');
+        const orig = el.textContent;
+        el.textContent = 'Copied!';
+        setTimeout(() => { el.textContent = orig; }, 1200);
+      });
+    }
 
     // Restore saved values
     document.getElementById('gateway-url').value =
       localStorage.getItem('geneva-client-gateway-url') || window.location.origin;
 
     let socket = null;
+    let hasMessages = false;
 
     function setStatus(state) {
       const dot = document.getElementById('status-dot');
@@ -359,12 +563,19 @@
       text.textContent = state.charAt(0).toUpperCase() + state.slice(1);
     }
 
+    function hideEmptyState() {
+      if (!hasMessages) {
+        hasMessages = true;
+        const es = document.getElementById('empty-state');
+        if (es) es.remove();
+      }
+    }
+
     function appendMsg(type, text, from) {
+      hideEmptyState();
       const el = document.getElementById('messages');
       const wrap = document.createElement('div');
-      wrap.style.display = 'flex';
-      wrap.style.flexDirection = 'column';
-      wrap.style.alignItems = type === 'self' ? 'flex-end' : type === 'system' ? 'center' : 'flex-start';
+      wrap.className = 'msg-wrap ' + type;
 
       if (from && type === 'in') {
         const label = document.createElement('div');
@@ -382,22 +593,51 @@
       el.scrollTop = el.scrollHeight;
     }
 
+    // --- Target bar toggle ---
+    let targetOpen = false;
+    function toggleTargetBar() {
+      targetOpen = !targetOpen;
+      document.getElementById('target-bar').classList.toggle('open', targetOpen);
+      document.getElementById('target-toggle').classList.toggle('open', targetOpen);
+      updateTargetLabel();
+    }
+    function updateTargetLabel() {
+      const did = document.getElementById('target-device-id').value.trim();
+      const aid = document.getElementById('target-agent-id').value.trim();
+      const label = document.getElementById('target-toggle-label');
+      if (!targetOpen && did && aid) {
+        label.textContent = did.slice(0, 8) + ' / ' + aid.slice(0, 8);
+      } else {
+        label.textContent = (did || aid) ? 'Target' : 'Set target';
+      }
+    }
+
     function showChat() {
       document.getElementById('setup-screen').style.display = 'none';
       document.getElementById('chat-screen').classList.add('active');
-      document.getElementById('disconnect-fab').style.display = 'block';
+      document.getElementById('btn-disconnect').classList.add('visible');
 
       // Restore targets
       document.getElementById('target-device-id').value =
         localStorage.getItem('geneva-client-target-device-id') || '';
       document.getElementById('target-agent-id').value =
         localStorage.getItem('geneva-client-target-agent-id') || '';
+
+      // Auto-open target bar if not set
+      const did = document.getElementById('target-device-id').value.trim();
+      const aid = document.getElementById('target-agent-id').value.trim();
+      if (!did || !aid) {
+        targetOpen = true;
+        document.getElementById('target-bar').classList.add('open');
+        document.getElementById('target-toggle').classList.add('open');
+      }
+      updateTargetLabel();
     }
 
     function showSetup() {
-      document.getElementById('setup-screen').style.display = 'block';
+      document.getElementById('setup-screen').style.display = 'flex';
       document.getElementById('chat-screen').classList.remove('active');
-      document.getElementById('disconnect-fab').style.display = 'none';
+      document.getElementById('btn-disconnect').classList.remove('visible');
       document.getElementById('btn-connect').disabled = false;
     }
 
@@ -424,7 +664,7 @@
         if (res.success) {
           setStatus('registered');
           showChat();
-          appendMsg('system', 'Connected');
+          appendMsg('system', 'Connected to gateway');
         } else {
           appendMsg('system', 'Registration failed: ' + res.error);
           setStatus('disconnected');
@@ -465,10 +705,18 @@
       const targetDeviceId = document.getElementById('target-device-id').value.trim();
       const targetAgentId = document.getElementById('target-agent-id').value.trim();
       if (!text || !socket) return;
-      if (!targetDeviceId || !targetAgentId) return;
+
+      if (!targetDeviceId || !targetAgentId) {
+        // Open target bar if not set
+        if (!targetOpen) toggleTargetBar();
+        return;
+      }
 
       localStorage.setItem('geneva-client-target-device-id', targetDeviceId);
       localStorage.setItem('geneva-client-target-agent-id', targetAgentId);
+
+      // Collapse target bar after first send
+      if (targetOpen) toggleTargetBar();
 
       socket.emit('send', {
         id: crypto.randomUUID(),
@@ -482,6 +730,10 @@
       appendMsg('self', text);
       input.value = '';
     }
+
+    // Update target label on blur
+    document.getElementById('target-device-id').addEventListener('blur', updateTargetLabel);
+    document.getElementById('target-agent-id').addEventListener('blur', updateTargetLabel);
 
     // --- PWA: Register Service Worker ---
     if ('serviceWorker' in navigator) {
