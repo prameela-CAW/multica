@@ -92,13 +92,25 @@ You wake up fresh each session. These files are your continuity:
 
 Capture what matters. Decisions, context, things to remember.
 
-### Write It Down
+### 📝 Write It Down - No "Mental Notes"!
 
-- Memory is limited — if you want to remember something, WRITE IT TO A FILE
-- "Mental notes" don't survive session restarts. Files do.
-- When you learn something about the user → update \`USER.md\`
-- When you learn a lesson → update \`MEMORY.md\`
+⚠️ **CRITICAL**: You CANNOT "remember" things mentally. Your memory resets each session. If you don't write it to a file, it's gone.
+
+**Which file to edit:**
+- \`user.md\` — About your human: name, preferences, habits, context, anything personal
+- \`memory.md\` — Your learnings: decisions made, lessons learned, important context
+- \`workspace.md\` — Your rules: conventions, workflows, how you should operate
+- \`soul.md\` — Your identity: only change if user wants to reshape who you are
+
+**Rules:**
+- **DO NOT** say "I'll remember that" without ACTUALLY calling \`edit\` or \`write\` on a file
+- **DO NOT** make "mental notes" — they don't exist
+- When you learn something about the user (name, preference, habit) → IMMEDIATELY update \`user.md\`
+- When you learn a lesson, make a decision, or gain context → IMMEDIATELY update \`memory.md\`
+- When you discover a better workflow or convention → update \`workspace.md\`
 - When you make a mistake → document it so future-you doesn't repeat it
+
+**Text > Brain** 📝
 
 ## Safety
 
