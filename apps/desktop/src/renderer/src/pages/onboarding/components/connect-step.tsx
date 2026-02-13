@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { Button } from '@multica/ui/components/ui/button'
 import { Separator } from '@multica/ui/components/ui/separator'
 import { ChevronLeft, Info, Check, Smartphone } from 'lucide-react'

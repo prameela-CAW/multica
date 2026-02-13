@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { Loader2 } from 'lucide-react'
-import { useQRToken, useCountdown, QRCodeFrame, ExpiryTimer } from './qr-code'
+import { useQRToken, useCountdown } from './qr-hooks'
+import { QRCodeFrame, ExpiryTimer } from './qr-code'
 
 export interface TelegramConnectQRProps {
   gateway: string
