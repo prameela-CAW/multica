@@ -1,0 +1,80 @@
+diff --git a/dist/agent-loop.js b/dist/agent-loop.js
+index b26d45753809da14df6409354e8c537684b9acd7..931399cc12bafea940fe99ab74ae288d71506e52 100644
+--- a/dist/agent-loop.js
++++ b/dist/agent-loop.js
+@@ -206,17 +206,18 @@ async function streamAssistantResponse(context, config, signal, stream, streamFn
+  */
+ async function executeToolCalls(tools, assistantMessage, signal, stream, getSteeringMessages) {
+     const toolCalls = assistantMessage.content.filter((c) => c.type === "toolCall");
+-    const results = [];
+-    let steeringMessages;
+-    for (let index = 0; index < toolCalls.length; index++) {
+-        const toolCall = toolCalls[index];
+-        const tool = tools?.find((t) => t.name === toolCall.name);
++    // Emit all tool_execution_start events immediately
++    for (const toolCall of toolCalls) {
+         stream.push({
+             type: "tool_execution_start",
+             toolCallId: toolCall.id,
+             toolName: toolCall.name,
+             args: toolCall.arguments,
+         });
++    }
++    // Execute all tools in parallel
++    const settled = await Promise.allSettled(toolCalls.map(async (toolCall) => {
++        const tool = tools?.find((t) => t.name === toolCall.name);
+         let result;
+         let isError = false;
+         try {
+@@ -240,6 +241,27 @@ async function executeToolCalls(tools, assistantMessage, signal, stream, getStee
+             };
+             isError = true;
+         }
++        return { result, isError };
++    }));
++    // Process results IN ORIGINAL ORDER (critical for LLM context)
++    const results = [];
++    let steeringMessages;
++    for (let i = 0; i < settled.length; i++) {
++        const entry = settled[i];
++        const toolCall = toolCalls[i];
++        let result;
++        let isError;
++        if (entry.status === "fulfilled") {
++            result = entry.value.result;
++            isError = entry.value.isError;
++        }
++        else {
++            result = {
++                content: [{ type: "text", text: entry.reason instanceof Error ? entry.reason.message : String(entry.reason) }],
++                details: {},
++            };
++            isError = true;
++        }
+         stream.push({
+             type: "tool_execution_end",
+             toolCallId: toolCall.id,
+@@ -259,17 +281,12 @@ async function executeToolCalls(tools, assistantMessage, signal, stream, getStee
+         results.push(toolResultMessage);
+         stream.push({ type: "message_start", message: toolResultMessage });
+         stream.push({ type: "message_end", message: toolResultMessage });
+-        // Check for steering messages - skip remaining tools if user interrupted
+-        if (getSteeringMessages) {
+-            const steering = await getSteeringMessages();
+-            if (steering.length > 0) {
+-                steeringMessages = steering;
+-                const remainingCalls = toolCalls.slice(index + 1);
+-                for (const skipped of remainingCalls) {
+-                    results.push(skipToolCall(skipped, stream));
+-                }
+-                break;
+-            }
++    }
++    // Check steering messages once after all tools complete
++    if (getSteeringMessages) {
++        const steering = await getSteeringMessages();
++        if (steering.length > 0) {
++            steeringMessages = steering;
+         }
+     }
+     return { toolResults: results, steeringMessages };

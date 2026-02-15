@@ -114,7 +114,7 @@ function extractRunLogResultDetails(result: unknown): Record<string, unknown> | 
 
 function formatRunLogToolSummary(tool: string, details: Record<string, unknown> | null): string | undefined {
   if (!details) return undefined;
-  if (details.error) return `error: ${details.message || details.error}`;
+  if (details.error) return `error: ${details.code || details.message || details.error}`;
   switch (tool) {
     case "web_search": return `${details.count ?? 0} results`;
     case "web_fetch": {
@@ -780,17 +780,19 @@ export class Agent {
 
   private handleRunLogEvent(event: AgentEvent) {
     if (event.type === "tool_execution_start") {
+      const toolCallId = (event as any).toolCallId ?? "unknown";
       const toolName = (event as any).toolName ?? "unknown";
-      this.toolStartTimes.set(toolName, Date.now());
+      this.toolStartTimes.set(toolCallId, Date.now());
       this.runLog.log("tool_start", {
         tool: toolName,
         args: JSON.stringify((event as any).args ?? {}).slice(0, 500),
       });
     } else if (event.type === "tool_execution_end") {
+      const toolCallId = (event as any).toolCallId ?? "unknown";
       const toolName = (event as any).toolName ?? "unknown";
-      const startTime = this.toolStartTimes.get(toolName);
+      const startTime = this.toolStartTimes.get(toolCallId);
       const duration_ms = startTime ? Date.now() - startTime : undefined;
-      this.toolStartTimes.delete(toolName);
+      this.toolStartTimes.delete(toolCallId);
 
       // Extract result metadata for run-log persistence (survives session compaction)
       const result = (event as any).result;
@@ -806,7 +808,7 @@ export class Agent {
         result_summary: formatRunLogToolSummary(toolName, details),
       };
       if (details?.error) {
-        toolEndData.error_type = String(details.error);
+        toolEndData.error_type = details.code ? String(details.code) : String(details.error);
       }
       this.runLog.log("tool_end", toolEndData);
     }

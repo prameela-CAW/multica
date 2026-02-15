@@ -44,6 +44,9 @@
     "overrides": {
       "@types/react": "catalog:",
       "@types/react-dom": "catalog:"
+    },
+    "patchedDependencies": {
+      "@mariozechner/pi-agent-core@0.52.9": "patches/@mariozechner__pi-agent-core@0.52.9.patch"
     }
   },
   "devDependencies": {
