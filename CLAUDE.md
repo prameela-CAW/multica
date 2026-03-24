@@ -82,13 +82,15 @@ docker compose down   # Stop PostgreSQL
   - `test(scope): ...`
   - `chore(scope): ...`
 
-## 8. Minimum Pre-Push Checks
+## 8. Verification Commands
 
 ```bash
 make check    # Runs all checks: typecheck, unit tests, Go tests, E2E
 ```
 
-For individual checks during development:
+Run verification only when the user explicitly asks for it.
+
+For targeted checks when requested:
 ```bash
 pnpm typecheck        # TypeScript type errors only
 pnpm test             # TS unit tests only (Vitest)
@@ -96,30 +98,7 @@ make test             # Go tests only
 pnpm exec playwright test   # E2E only (requires backend + frontend running)
 ```
 
-## 9. AI Agent Verification Loop
-
-After writing or modifying code, always run the full verification pipeline:
-
-```bash
-make check
-```
-
-This runs all checks in sequence:
-1. TypeScript typecheck (`pnpm typecheck`)
-2. TypeScript unit tests (`pnpm test`)
-3. Go tests (`go test ./...`)
-4. E2E tests (auto-starts backend + frontend if needed, runs Playwright)
-
-**Workflow:**
-- Write code to satisfy the requirement
-- Run `make check`
-- If any step fails, read the error output, fix the code, and re-run `make check`
-- Repeat until all checks pass
-- Only then consider the task complete
-
-**Quick iteration:** If you know only TypeScript or Go is affected, run individual checks first for faster feedback, then finish with a full `make check` before marking work complete.
-
-## 10. E2E Test Patterns
+## 9. E2E Test Patterns
 
 E2E tests should be self-contained. Use the `TestApiClient` fixture for data setup/teardown:
 
