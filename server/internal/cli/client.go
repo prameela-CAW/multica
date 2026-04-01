@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -154,6 +156,60 @@ func (c *APIClient) PutJSON(ctx context.Context, path string, body any, out any)
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// UploadFile uploads a file via multipart form to /api/upload-file.
+// It returns the attachment ID from the server response.
+func (c *APIClient) UploadFile(ctx context.Context, fileData []byte, filename string, issueID string) (string, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	part, err := writer.CreateFormFile("file", filepath.Base(filename))
+	if err != nil {
+		return "", fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := part.Write(fileData); err != nil {
+		return "", fmt.Errorf("write file data: %w", err)
+	}
+
+	if issueID != "" {
+		if err := writer.WriteField("issue_id", issueID); err != nil {
+			return "", fmt.Errorf("write issue_id field: %w", err)
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("close multipart writer: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/api/upload-file", &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	c.setHeaders(req)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respData, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return "", fmt.Errorf("upload file returned %d: %s", resp.StatusCode, strings.TrimSpace(string(respData)))
+	}
+
+	var result map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode upload response: %w", err)
+	}
+
+	id, _ := result["id"].(string)
+	if id == "" {
+		return "", fmt.Errorf("upload response missing attachment id")
+	}
+	return id, nil
 }
 
 // HealthCheck hits the /health endpoint and returns the response body.

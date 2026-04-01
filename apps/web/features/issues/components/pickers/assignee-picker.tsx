@@ -13,7 +13,7 @@ import {
   PickerEmpty,
 } from "./property-picker";
 
-function canAssignAgent(agent: Agent, userId: string | undefined, memberRole: string | undefined): boolean {
+export function canAssignAgent(agent: Agent, userId: string | undefined, memberRole: string | undefined): boolean {
   if (agent.visibility !== "private") return true;
   if (agent.owner_id === userId) return true;
   if (memberRole === "owner" || memberRole === "admin") return true;
@@ -76,10 +76,10 @@ export function AssigneePicker({
       }}
       width="w-52"
       align={align}
-      triggerRender={triggerRender}
       searchable
       searchPlaceholder="Assign to..."
       onSearchChange={setFilter}
+      triggerRender={triggerRender}
       trigger={
         customTrigger ? customTrigger : assigneeType && assigneeId ? (
           <>

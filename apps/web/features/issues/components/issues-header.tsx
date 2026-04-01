@@ -147,7 +147,6 @@ function ActorSubContent({
   const [search, setSearch] = useState("");
   const members = useWorkspaceStore((s) => s.members);
   const agents = useWorkspaceStore((s) => s.agents);
-
   const query = search.toLowerCase();
   const filteredMembers = members.filter((m) =>
     m.name.toLowerCase().includes(query),

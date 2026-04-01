@@ -57,7 +57,7 @@ import { AvatarGroup, AvatarGroupCount } from "@/components/ui/avatar";
 import { ActorAvatar } from "@/components/common/actor-avatar";
 import type { UpdateIssueRequest, IssueStatus, IssuePriority, TimelineEntry } from "@/shared/types";
 import { ALL_STATUSES, STATUS_CONFIG, PRIORITY_ORDER, PRIORITY_CONFIG } from "@/features/issues/config";
-import { StatusIcon, PriorityIcon, DueDatePicker, AssigneePicker } from "@/features/issues/components";
+import { StatusIcon, PriorityIcon, DueDatePicker, AssigneePicker, canAssignAgent } from "@/features/issues/components";
 import { CommentCard } from "./comment-card";
 import { CommentInput } from "./comment-input";
 import { AgentLiveCard, TaskRunHistory } from "./agent-live-card";
@@ -173,8 +173,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
   const workspace = useWorkspaceStore((s) => s.workspace);
   const members = useWorkspaceStore((s) => s.members);
   const agents = useWorkspaceStore((s) => s.agents);
-  const currentMember = members.find((m) => m.user_id === user?.id);
-  const memberRole = currentMember?.role;
+  const currentMemberRole = members.find((m) => m.user_id === user?.id)?.role;
 
   // Issue navigation
   const allIssues = useIssueStore((s) => s.issues);
@@ -427,12 +426,7 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
                         {issue.assignee_type === "member" && issue.assignee_id === m.user_id && <span className="ml-auto text-xs text-muted-foreground">✓</span>}
                       </DropdownMenuItem>
                     ))}
-                    {agents.filter((a) => {
-                      if (a.visibility !== "private") return true;
-                      if (a.owner_id === user?.id) return true;
-                      if (memberRole === "owner" || memberRole === "admin") return true;
-                      return false;
-                    }).map((a) => (
+                    {agents.filter((a) => canAssignAgent(a, user?.id, currentMemberRole)).map((a) => (
                       <DropdownMenuItem
                         key={a.id}
                         onClick={() => handleUpdateField({ assignee_type: "agent", assignee_id: a.id })}
