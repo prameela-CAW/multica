@@ -25,6 +25,7 @@ import { Markdown } from "@/components/markdown/Markdown";
 import { FileUploadButton } from "@/components/common/file-upload-button";
 import { useFileUpload } from "@/shared/hooks/use-file-upload";
 import { ReplyInput } from "./reply-input";
+import { AttachmentList } from "./attachment-list";
 import type { TimelineEntry } from "@/shared/types";
 
 // ---------------------------------------------------------------------------
@@ -193,6 +194,9 @@ function CommentRow({
           <div className="mt-1.5 pl-8 text-sm leading-relaxed text-foreground/85">
             <Markdown mode="minimal">{entry.content ?? ""}</Markdown>
           </div>
+          {entry.attachments && entry.attachments.length > 0 && (
+            <AttachmentList attachments={entry.attachments} className="mt-1.5 pl-8" />
+          )}
           {!isTemp && (
             <ReactionBar
               reactions={reactions}
@@ -390,6 +394,9 @@ function CommentCard({
                 <div className="pl-10 text-sm leading-relaxed text-foreground/85">
                   <Markdown mode="minimal">{entry.content ?? ""}</Markdown>
                 </div>
+                {entry.attachments && entry.attachments.length > 0 && (
+                  <AttachmentList attachments={entry.attachments} className="mt-1.5 pl-10" />
+                )}
                 {!isTemp && (
                   <ReactionBar
                     reactions={reactions}

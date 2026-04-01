@@ -37,6 +37,7 @@ export interface Issue {
   position: number;
   due_date: string | null;
   reactions?: IssueReaction[];
+  attachments?: import("./attachment").Attachment[];
   created_at: string;
   updated_at: string;
 }

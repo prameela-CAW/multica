@@ -44,6 +44,7 @@ import {
 import { ResizablePanelGroup, ResizablePanel, ResizableHandle } from "@/components/ui/resizable";
 import { RichTextEditor } from "@/components/common/rich-text-editor";
 import { FileUploadButton } from "@/components/common/file-upload-button";
+import { AttachmentList } from "./attachment-list";
 import { TitleEditor } from "@/components/common/title-editor";
 import {
   Tooltip,
@@ -196,21 +197,22 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
   const issue = useIssueStore((s) => s.issues.find((i) => i.id === id)) ?? null;
   const [issueLoading, setIssueLoading] = useState(!issue);
 
-  // If issue isn't in the store yet, fetch and upsert it
+  // Always fetch single issue to get attachments (listIssues doesn't include them).
   useEffect(() => {
-    if (issue) {
-      setIssueLoading(false);
-      return;
-    }
-    setIssueLoading(true);
+    if (!issue) setIssueLoading(true);
     api
       .getIssue(id)
       .then((iss) => {
-        useIssueStore.getState().addIssue(iss);
+        const store = useIssueStore.getState();
+        if (store.issues.some((i) => i.id === iss.id)) {
+          store.updateIssue(iss.id, iss);
+        } else {
+          store.addIssue(iss);
+        }
       })
       .catch(console.error)
       .finally(() => setIssueLoading(false));
-  }, [id, !!issue]);
+  }, [id]);
 
   // Custom hooks — encapsulate timeline, reactions, subscribers
   const {
@@ -577,6 +579,10 @@ export function IssueDetail({ issueId, onDelete, defaultSidebarOpen = true, layo
               onInsert={(result, isImage) => descEditorRef.current?.insertFile(result.filename, result.link, isImage)}
             />
           </div>
+
+          {issue.attachments && issue.attachments.length > 0 && (
+            <AttachmentList attachments={issue.attachments} className="mt-4" />
+          )}
 
           <div className="my-8 border-t" />
 
