@@ -83,6 +83,42 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	workspaceID := resolveWorkspaceID(r)
+	wsUUID := parseUUID(workspaceID)
+
+	// Parse optional filter params
+	var priorityFilter pgtype.Text
+	if p := r.URL.Query().Get("priority"); p != "" {
+		priorityFilter = pgtype.Text{String: p, Valid: true}
+	}
+	var assigneeFilter pgtype.UUID
+	if a := r.URL.Query().Get("assignee_id"); a != "" {
+		assigneeFilter = parseUUID(a)
+	}
+
+	// open_only=true returns all non-done/cancelled issues (no limit).
+	if r.URL.Query().Get("open_only") == "true" {
+		issues, err := h.Queries.ListOpenIssues(ctx, db.ListOpenIssuesParams{
+			WorkspaceID: wsUUID,
+			Priority:    priorityFilter,
+			AssigneeID:  assigneeFilter,
+		})
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to list issues")
+			return
+		}
+
+		prefix := h.getIssuePrefix(ctx, wsUUID)
+		resp := make([]IssueResponse, len(issues))
+		for i, issue := range issues {
+			resp[i] = issueToResponse(issue, prefix)
+		}
+
+		writeJSON(w, http.StatusOK, map[string]any{
+			"issues": resp,
+			"total":  len(resp),
+		})
+		return
+	}
 
 	limit := 100
 	offset := 0
@@ -97,22 +133,13 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Parse optional filter params
 	var statusFilter pgtype.Text
 	if s := r.URL.Query().Get("status"); s != "" {
 		statusFilter = pgtype.Text{String: s, Valid: true}
 	}
-	var priorityFilter pgtype.Text
-	if p := r.URL.Query().Get("priority"); p != "" {
-		priorityFilter = pgtype.Text{String: p, Valid: true}
-	}
-	var assigneeFilter pgtype.UUID
-	if a := r.URL.Query().Get("assignee_id"); a != "" {
-		assigneeFilter = parseUUID(a)
-	}
 
 	issues, err := h.Queries.ListIssues(ctx, db.ListIssuesParams{
-		WorkspaceID: parseUUID(workspaceID),
+		WorkspaceID: wsUUID,
 		Limit:       int32(limit),
 		Offset:      int32(offset),
 		Status:      statusFilter,
@@ -124,7 +151,18 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	prefix := h.getIssuePrefix(ctx, parseUUID(workspaceID))
+	// Get the true total count for pagination awareness.
+	total, err := h.Queries.CountIssues(ctx, db.CountIssuesParams{
+		WorkspaceID: wsUUID,
+		Status:      statusFilter,
+		Priority:    priorityFilter,
+		AssigneeID:  assigneeFilter,
+	})
+	if err != nil {
+		total = int64(len(issues))
+	}
+
+	prefix := h.getIssuePrefix(ctx, wsUUID)
 	resp := make([]IssueResponse, len(issues))
 	for i, issue := range issues {
 		resp[i] = issueToResponse(issue, prefix)
@@ -132,7 +170,7 @@ func (h *Handler) ListIssues(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"issues": resp,
-		"total":  len(resp),
+		"total":  total,
 	})
 }
 

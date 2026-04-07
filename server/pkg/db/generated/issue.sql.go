@@ -11,6 +11,33 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const countIssues = `-- name: CountIssues :one
+SELECT count(*) FROM issue
+WHERE workspace_id = $1
+  AND ($2::text IS NULL OR status = $2)
+  AND ($3::text IS NULL OR priority = $3)
+  AND ($4::uuid IS NULL OR assignee_id = $4)
+`
+
+type CountIssuesParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Status      pgtype.Text `json:"status"`
+	Priority    pgtype.Text `json:"priority"`
+	AssigneeID  pgtype.UUID `json:"assignee_id"`
+}
+
+func (q *Queries) CountIssues(ctx context.Context, arg CountIssuesParams) (int64, error) {
+	row := q.db.QueryRow(ctx, countIssues,
+		arg.WorkspaceID,
+		arg.Status,
+		arg.Priority,
+		arg.AssigneeID,
+	)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createIssue = `-- name: CreateIssue :one
 INSERT INTO issue (
     workspace_id, title, description, status, priority,
@@ -217,6 +244,60 @@ func (q *Queries) ListIssues(ctx context.Context, arg ListIssuesParams) ([]Issue
 		arg.Priority,
 		arg.AssigneeID,
 	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Issue{}
+	for rows.Next() {
+		var i Issue
+		if err := rows.Scan(
+			&i.ID,
+			&i.WorkspaceID,
+			&i.Title,
+			&i.Description,
+			&i.Status,
+			&i.Priority,
+			&i.AssigneeType,
+			&i.AssigneeID,
+			&i.CreatorType,
+			&i.CreatorID,
+			&i.ParentIssueID,
+			&i.AcceptanceCriteria,
+			&i.ContextRefs,
+			&i.Position,
+			&i.DueDate,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.Number,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listOpenIssues = `-- name: ListOpenIssues :many
+SELECT id, workspace_id, title, description, status, priority, assignee_type, assignee_id, creator_type, creator_id, parent_issue_id, acceptance_criteria, context_refs, position, due_date, created_at, updated_at, number FROM issue
+WHERE workspace_id = $1
+  AND status NOT IN ('done', 'cancelled')
+  AND ($2::text IS NULL OR priority = $2)
+  AND ($3::uuid IS NULL OR assignee_id = $3)
+ORDER BY position ASC, created_at DESC
+`
+
+type ListOpenIssuesParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	Priority    pgtype.Text `json:"priority"`
+	AssigneeID  pgtype.UUID `json:"assignee_id"`
+}
+
+func (q *Queries) ListOpenIssues(ctx context.Context, arg ListOpenIssuesParams) ([]Issue, error) {
+	rows, err := q.db.Query(ctx, listOpenIssues, arg.WorkspaceID, arg.Priority, arg.AssigneeID)
 	if err != nil {
 		return nil, err
 	}

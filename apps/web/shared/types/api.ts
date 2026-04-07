@@ -31,6 +31,7 @@ export interface ListIssuesParams {
   status?: IssueStatus;
   priority?: IssuePriority;
   assignee_id?: string;
+  open_only?: boolean;
 }
 
 export interface ListIssuesResponse {
