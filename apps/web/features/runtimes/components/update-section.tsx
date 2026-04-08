@@ -9,47 +9,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { api } from "@/shared/api";
 import type { RuntimeUpdateStatus } from "@/shared/types";
-
-const GITHUB_RELEASES_URL =
-  "https://api.github.com/repos/multica-ai/multica/releases/latest";
-const CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-
-let cachedLatestVersion: string | null = null;
-let cachedAt = 0;
-
-async function fetchLatestVersion(): Promise<string | null> {
-  if (cachedLatestVersion && Date.now() - cachedAt < CACHE_TTL_MS) {
-    return cachedLatestVersion;
-  }
-  try {
-    const resp = await fetch(GITHUB_RELEASES_URL, {
-      headers: { Accept: "application/vnd.github+json" },
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    cachedLatestVersion = data.tag_name ?? null;
-    cachedAt = Date.now();
-    return cachedLatestVersion;
-  } catch {
-    return null;
-  }
-}
-
-function stripV(v: string): string {
-  return v.replace(/^v/, "");
-}
-
-function isNewer(latest: string, current: string): boolean {
-  const l = stripV(latest).split(".").map(Number);
-  const c = stripV(current).split(".").map(Number);
-  for (let i = 0; i < Math.max(l.length, c.length); i++) {
-    const lv = l[i] ?? 0;
-    const cv = c[i] ?? 0;
-    if (lv > cv) return true;
-    if (lv < cv) return false;
-  }
-  return false;
-}
+import { fetchLatestVersion, isNewer } from "../version";
 
 const statusConfig: Record<
   RuntimeUpdateStatus,

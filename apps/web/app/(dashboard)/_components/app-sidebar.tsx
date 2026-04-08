@@ -19,6 +19,8 @@ import {
 } from "lucide-react";
 import { WorkspaceAvatar } from "@/features/workspace";
 import { useIssueDraftStore } from "@/features/issues/stores/draft-store";
+import { runtimeListOptions, latestCliVersionOptions } from "@core/runtimes/queries";
+import { runtimeNeedsUpdate } from "@/features/runtimes/version";
 import {
   Sidebar,
   SidebarContent,
@@ -65,6 +67,14 @@ function DraftDot() {
   const hasDraft = useIssueDraftStore((s) => !!(s.draft.title || s.draft.description));
   if (!hasDraft) return null;
   return <span className="absolute top-0 right-0 size-1.5 rounded-full bg-brand" />;
+}
+
+function RuntimeUpdateDot({ wsId }: { wsId: string }) {
+  const { data: runtimes = [] } = useQuery(runtimeListOptions(wsId));
+  const { data: latestVersion } = useQuery(latestCliVersionOptions());
+  const hasUpdates = runtimes.some((r) => runtimeNeedsUpdate(r, latestVersion ?? null));
+  if (!hasUpdates) return null;
+  return <span className="ml-auto size-2 rounded-full bg-destructive" />;
 }
 
 export function AppSidebar() {
@@ -224,6 +234,9 @@ export function AppSidebar() {
                       >
                         <item.icon />
                         <span>{item.label}</span>
+                        {item.label === "Runtimes" && wsId && (
+                          <RuntimeUpdateDot wsId={wsId} />
+                        )}
                       </SidebarMenuButton>
                     </SidebarMenuItem>
                   );

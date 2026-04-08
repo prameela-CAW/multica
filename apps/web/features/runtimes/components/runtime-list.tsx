@@ -1,14 +1,19 @@
-import { Server } from "lucide-react";
+import { ArrowUpCircle, Server } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import type { AgentRuntime } from "@/shared/types";
+import { latestCliVersionOptions } from "@core/runtimes/queries";
+import { runtimeNeedsUpdate } from "../version";
 import { RuntimeModeIcon } from "./shared";
 
 function RuntimeListItem({
   runtime,
   isSelected,
+  hasUpdate,
   onClick,
 }: {
   runtime: AgentRuntime;
   isSelected: boolean;
+  hasUpdate: boolean;
   onClick: () => void;
 }) {
   return (
@@ -19,16 +24,28 @@ function RuntimeListItem({
       }`}
     >
       <div
-        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
+        className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ${
           runtime.status === "online" ? "bg-success/10" : "bg-muted"
         }`}
       >
         <RuntimeModeIcon mode={runtime.runtime_mode} />
+        {hasUpdate && (
+          <span className="absolute -top-1 -right-1 size-2.5 rounded-full bg-destructive ring-2 ring-background" />
+        )}
       </div>
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-medium">{runtime.name}</div>
         <div className="mt-0.5 truncate text-xs text-muted-foreground">
-          {runtime.provider} &middot; {runtime.runtime_mode}
+          {hasUpdate ? (
+            <span className="inline-flex items-center gap-1 text-destructive">
+              <ArrowUpCircle className="h-3 w-3" />
+              Update available
+            </span>
+          ) : (
+            <>
+              {runtime.provider} &middot; {runtime.runtime_mode}
+            </>
+          )}
         </div>
       </div>
       <div
@@ -49,6 +66,8 @@ export function RuntimeList({
   selectedId: string;
   onSelect: (id: string) => void;
 }) {
+  const { data: latestVersion } = useQuery(latestCliVersionOptions());
+
   return (
     <div className="overflow-y-auto h-full border-r">
       <div className="flex h-12 items-center justify-between border-b px-4">
@@ -79,6 +98,7 @@ export function RuntimeList({
               key={runtime.id}
               runtime={runtime}
               isSelected={runtime.id === selectedId}
+              hasUpdate={runtimeNeedsUpdate(runtime, latestVersion ?? null)}
               onClick={() => onSelect(runtime.id)}
             />
           ))}
