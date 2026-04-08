@@ -1,7 +1,7 @@
 import type { WSMessage, WSEventType } from "@/shared/types";
 import { type Logger, noopLogger } from "@/shared/logger";
 
-type EventHandler = (payload: unknown) => void;
+type EventHandler = (payload: unknown, actorId?: string) => void;
 
 export class WSClient {
   private ws: WebSocket | null = null;
@@ -53,7 +53,7 @@ export class WSClient {
       const eventHandlers = this.handlers.get(msg.type);
       if (eventHandlers) {
         for (const handler of eventHandlers) {
-          handler(msg.payload);
+          handler(msg.payload, msg.actor_id);
         }
       }
       for (const handler of this.anyHandlers) {

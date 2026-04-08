@@ -86,20 +86,16 @@ export function useRealtimeSync(ws: WSClient | null) {
     ]);
 
     const unsubAny = ws.onAny((msg) => {
-      const myUserId = useAuthStore.getState().user?.id;
-      if (msg.actor_id && msg.actor_id === myUserId) {
-        logger.debug("skipping self-event", msg.type);
-        return;
-      }
       if (specificEvents.has(msg.type)) return;
       const prefix = msg.type.split(":")[0] ?? "";
       const refresh = refreshMap[prefix];
       if (refresh) debouncedRefresh(prefix, refresh);
     });
 
-    // --- Specific event handlers (granular updates, no full refetch) ---
-    // NOTE: ws.on() passes msg.payload (no actor_id). Self-event suppression
-    // requires WSClient changes to expose actor_id — tracked as separate task.
+    // --- Specific event handlers (granular cache updates) ---
+    // No self-event filtering: actor_id identifies the USER, not the TAB.
+    // Filtering by actor_id would block other tabs of the same user.
+    // Instead, both mutations and WS handlers use dedup checks to be idempotent.
 
     const unsubIssueUpdated = ws.on("issue:updated", (p) => {
       const { issue } = p as IssueUpdatedPayload;

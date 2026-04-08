@@ -63,11 +63,6 @@ export function useIssueTimeline(issueId: string, userId?: string) {
       (payload: unknown) => {
         const { comment } = payload as CommentCreatedPayload;
         if (comment.issue_id !== issueId) return;
-        if (
-          comment.author_type === "member" &&
-          comment.author_id === userId
-        )
-          return;
         qc.setQueryData<TimelineEntry[]>(
           issueKeys.timeline(issueId),
           (old) => {
@@ -77,7 +72,7 @@ export function useIssueTimeline(issueId: string, userId?: string) {
           },
         );
       },
-      [qc, issueId, userId],
+      [qc, issueId],
     ),
   );
 
@@ -161,11 +156,6 @@ export function useIssueTimeline(issueId: string, userId?: string) {
       (payload: unknown) => {
         const { reaction, issue_id } = payload as ReactionAddedPayload;
         if (issue_id !== issueId) return;
-        if (
-          reaction.actor_type === "member" &&
-          reaction.actor_id === userId
-        )
-          return;
         qc.setQueryData<TimelineEntry[]>(
           issueKeys.timeline(issueId),
           (old) =>
@@ -177,7 +167,7 @@ export function useIssueTimeline(issueId: string, userId?: string) {
             }),
         );
       },
-      [qc, issueId, userId],
+      [qc, issueId],
     ),
   );
 
@@ -187,7 +177,6 @@ export function useIssueTimeline(issueId: string, userId?: string) {
       (payload: unknown) => {
         const p = payload as ReactionRemovedPayload;
         if (p.issue_id !== issueId) return;
-        if (p.actor_type === "member" && p.actor_id === userId) return;
         qc.setQueryData<TimelineEntry[]>(
           issueKeys.timeline(issueId),
           (old) =>
@@ -207,7 +196,7 @@ export function useIssueTimeline(issueId: string, userId?: string) {
             }),
         );
       },
-      [qc, issueId, userId],
+      [qc, issueId],
     ),
   );
 

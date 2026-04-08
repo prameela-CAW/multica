@@ -21,10 +21,13 @@ export function useCreateIssue() {
     mutationFn: (data: CreateIssueRequest) => api.createIssue(data),
     onSuccess: (newIssue) => {
       qc.setQueryData<ListIssuesResponse>(issueKeys.list(wsId), (old) =>
-        old
+        old && !old.issues.some((i) => i.id === newIssue.id)
           ? { ...old, issues: [...old.issues, newIssue], total: old.total + 1 }
           : old,
       );
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
     },
   });
 }
@@ -203,6 +206,9 @@ export function useCreateComment(issueId: string) {
           return [...old, entry];
         },
       );
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: issueKeys.timeline(issueId) });
     },
   });
 }

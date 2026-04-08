@@ -22,7 +22,7 @@ const WS_URL =
     ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}/ws`
     : "ws://localhost:8080/ws");
 
-type EventHandler = (payload: unknown) => void;
+type EventHandler = (payload: unknown, actorId?: string) => void;
 
 interface WSContextValue {
   subscribe: (event: WSEventType, handler: EventHandler) => () => void;

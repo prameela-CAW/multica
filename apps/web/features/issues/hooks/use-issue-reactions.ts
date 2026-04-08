@@ -34,8 +34,6 @@ export function useIssueReactions(issueId: string, userId?: string) {
       (payload: unknown) => {
         const { reaction, issue_id } = payload as IssueReactionAddedPayload;
         if (issue_id !== issueId) return;
-        if (reaction.actor_type === "member" && reaction.actor_id === userId)
-          return;
         qc.setQueryData<IssueReaction[]>(
           issueKeys.reactions(issueId),
           (old) => {
@@ -45,7 +43,7 @@ export function useIssueReactions(issueId: string, userId?: string) {
           },
         );
       },
-      [qc, issueId, userId],
+      [qc, issueId],
     ),
   );
 
@@ -55,7 +53,6 @@ export function useIssueReactions(issueId: string, userId?: string) {
       (payload: unknown) => {
         const p = payload as IssueReactionRemovedPayload;
         if (p.issue_id !== issueId) return;
-        if (p.actor_type === "member" && p.actor_id === userId) return;
         qc.setQueryData<IssueReaction[]>(
           issueKeys.reactions(issueId),
           (old) =>
@@ -69,7 +66,7 @@ export function useIssueReactions(issueId: string, userId?: string) {
             ),
         );
       },
-      [qc, issueId, userId],
+      [qc, issueId],
     ),
   );
 
