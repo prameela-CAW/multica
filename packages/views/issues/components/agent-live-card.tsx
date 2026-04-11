@@ -354,7 +354,7 @@ function SingleAgentLiveCard({ task, items, issueId, agentName }: SingleAgentLiv
         )}
       >
         <div className="overflow-hidden">
-          {items.length > 0 && (
+          {items.length > 0 ? (
             <div
               ref={scrollRef}
               onScroll={handleScroll}
@@ -379,6 +379,12 @@ function SingleAgentLiveCard({ task, items, issueId, agentName }: SingleAgentLiv
                   Latest
                 </button>
               )}
+            </div>
+          ) : (
+            <div className="border-t border-info/10 px-3 py-3">
+              <p className="text-xs text-muted-foreground">
+                Live log is not available for this agent provider. Results will appear when the task completes.
+              </p>
             </div>
           )}
         </div>
