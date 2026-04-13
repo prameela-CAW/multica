@@ -85,10 +85,20 @@ export class ApiClient {
     this.workspaceId = id;
   }
 
+  private readCsrfToken(): string | null {
+    if (typeof document === "undefined") return null;
+    const match = document.cookie
+      .split("; ")
+      .find((c) => c.startsWith("multica_csrf="));
+    return match ? match.split("=")[1] ?? null : null;
+  }
+
   private authHeaders(): Record<string, string> {
     const headers: Record<string, string> = {};
     if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
     if (this.workspaceId) headers["X-Workspace-ID"] = this.workspaceId;
+    const csrf = this.readCsrfToken();
+    if (csrf) headers["X-CSRF-Token"] = csrf;
     return headers;
   }
 
@@ -166,6 +176,10 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify({ code, redirect_uri: redirectUri }),
     });
+  }
+
+  async logout(): Promise<void> {
+    await this.fetch("/auth/logout", { method: "POST" });
   }
 
   async getMe(): Promise<User> {
