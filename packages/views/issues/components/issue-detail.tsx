@@ -229,6 +229,7 @@ function IssuePickerDialog({
           const res = await api.searchIssues({
             q: q.trim(),
             limit: 20,
+            include_closed: true,
             signal: controller.signal,
           });
           if (!controller.signal.aborted) {
