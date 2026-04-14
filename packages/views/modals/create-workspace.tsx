@@ -83,6 +83,7 @@ export function CreateWorkspaceModal({ onClose }: { onClose: () => void }) {
       }}
     >
       <DialogContent
+        finalFocus={false}
         showCloseButton={false}
         className="inset-0 flex h-full w-full max-w-none sm:max-w-none translate-0 flex-col items-center justify-center rounded-none bg-background ring-0 shadow-none"
       >
