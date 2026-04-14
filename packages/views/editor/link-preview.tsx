@@ -158,7 +158,7 @@ function EditorLinkPreview({ editor }: { editor: Editor }) {
 
   const virtualRef = useRef({
     getBoundingClientRect: () => new DOMRect(),
-    contextElement: editor.view.dom,
+    contextElement: editor.view?.dom,
   });
 
   const { refs, floatingStyles, isPositioned, update } = useFloating({
@@ -171,8 +171,17 @@ function EditorLinkPreview({ editor }: { editor: Editor }) {
   });
 
   useEffect(() => {
+    if (typeof editor.on !== "function" || typeof editor.off !== "function") {
+      return;
+    }
+
     const check = () => {
+      const view = editor.view;
       if (!editor.isEditable) {
+        setVisible(false);
+        return;
+      }
+      if (!view?.dom || typeof view.coordsAtPos !== "function") {
         setVisible(false);
         return;
       }
@@ -186,11 +195,11 @@ function EditorLinkPreview({ editor }: { editor: Editor }) {
         return;
       }
 
-      const coords = editor.view.coordsAtPos(editor.state.selection.from);
+      const coords = view.coordsAtPos(editor.state.selection.from);
       virtualRef.current = {
         getBoundingClientRect: () =>
           new DOMRect(coords.left, coords.top, 0, coords.bottom - coords.top),
-        contextElement: editor.view.dom,
+        contextElement: view.dom,
       };
 
       setHref(linkHref);
@@ -204,11 +213,12 @@ function EditorLinkPreview({ editor }: { editor: Editor }) {
 
   // Close on any ancestor scroll or window resize
   useEffect(() => {
-    if (!visible) return;
+    const editorDom = editor.view?.dom;
+    if (!visible || !editorDom) return;
     const close = () => {
       setVisible(false);
     };
-    const ancestors = getOverflowAncestors(editor.view.dom);
+    const ancestors = getOverflowAncestors(editorDom);
     ancestors.forEach((el) => el.addEventListener("scroll", close, { passive: true }));
     window.addEventListener("resize", close);
     return () => {

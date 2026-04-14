@@ -30,6 +30,7 @@ import {
   useEffect,
   useImperativeHandle,
   useRef,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { useEditor, EditorContent } from "@tiptap/react";
 import { cn } from "@multica/ui/lib/utils";
@@ -222,11 +223,25 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
       },
     }));
 
+    const handleContainerMouseDown = (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (!editable || !editor) return;
+
+      const target = event.target as HTMLElement;
+      if (target.closest(".ProseMirror")) return;
+      if (target.closest("a, button, input, textarea, [role='button'], [data-node-view-wrapper]")) return;
+
+      event.preventDefault();
+      editor.commands.focus("end");
+    };
+
     if (!editor) return null;
 
     return (
-      <div className="relative min-h-full">
-        <EditorContent editor={editor} />
+      <div
+        className="relative flex min-h-full flex-col"
+        onMouseDown={handleContainerMouseDown}
+      >
+        <EditorContent className="flex-1 min-h-full" editor={editor} />
         {editable && (
           <>
             <EditorBubbleMenu editor={editor} />
