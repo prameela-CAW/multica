@@ -79,7 +79,7 @@ func openBrowser(url string) error {
 		args = []string{url}
 	case "windows":
 		cmd = "cmd"
-		args = []string{"/c", "start", url}
+		args = []string{"/c", "start", "", url}
 	default:
 		return fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
