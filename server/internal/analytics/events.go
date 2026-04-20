@@ -37,17 +37,14 @@ func Signup(userID, email, signupSource string) Event {
 	}
 }
 
-// WorkspaceCreated builds the workspace_created event. isFirstWorkspace is
-// true when this is the creator's first workspace — lets us measure new-user
-// activation separately from "power user creates second workspace".
-func WorkspaceCreated(userID, workspaceID string, isFirstWorkspace bool) Event {
+// WorkspaceCreated builds the workspace_created event. "Is this the user's
+// first workspace?" is deliberately not stamped here — it's derived in
+// PostHog by checking whether the user has a prior workspace_created event.
+func WorkspaceCreated(userID, workspaceID string) Event {
 	return Event{
 		Name:        EventWorkspaceCreated,
 		DistinctID:  userID,
 		WorkspaceID: workspaceID,
-		Properties: map[string]any{
-			"is_first_workspace": isFirstWorkspace,
-		},
 	}
 }
 

@@ -84,7 +84,14 @@ Fires after a `CreateWorkspace` transaction commits successfully.
 | Property | Type | Description |
 |---|---|---|
 | `workspace_id` | string (UUID) | Added globally; present here for clarity. |
-| `is_first_workspace` | boolean | `true` when this is the creator's first workspace — used to isolate the brand-new-user activation flow from returning users spinning up additional workspaces. |
+
+**Note on "first workspace" segmentation** — we deliberately do *not* stamp
+an `is_first_workspace` boolean at emit time. Computing it correctly would
+require an extra column or transaction-scoped logic that still races under
+concurrent creates. Instead, PostHog answers the same question exactly by
+looking at whether the user has a prior `workspace_created` event (use a
+funnel with "first time user does X" or a cohort on
+`person_properties.$initial_event`). No information is lost.
 
 ## Forthcoming events (PR 2 / PR 3)
 

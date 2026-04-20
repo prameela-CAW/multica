@@ -202,14 +202,11 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// is_first_workspace distinguishes the "brand-new user just activated" flow
-	// from a returning user spinning up a second workspace. A post-commit
-	// ListWorkspaces count of 1 means this is the user's first.
-	isFirstWorkspace := false
-	if wss, listErr := h.Queries.ListWorkspaces(r.Context(), parseUUID(userID)); listErr == nil {
-		isFirstWorkspace = len(wss) == 1
-	}
-	h.Analytics.Capture(analytics.WorkspaceCreated(userID, uuidToString(ws.ID), isFirstWorkspace))
+	// "Is this the user's first workspace?" is derived in PostHog by looking
+	// at whether they have a prior workspace_created event, not stamped at
+	// emit time. Stamping here would race under concurrent creates without
+	// a schema change, and the event stream answers the question exactly.
+	h.Analytics.Capture(analytics.WorkspaceCreated(userID, uuidToString(ws.ID)))
 
 	slog.Info("workspace created", append(logger.RequestAttrs(r), "workspace_id", uuidToString(ws.ID), "name", ws.Name, "slug", ws.Slug)...)
 	writeJSON(w, http.StatusCreated, workspaceToResponse(ws))
