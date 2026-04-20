@@ -57,6 +57,7 @@ func (b *opencodeBackend) Execute(ctx context.Context, prompt string, opts ExecO
 	cmd := exec.CommandContext(runCtx, execPath, args...)
 	b.cfg.Logger.Debug("agent command", "exec", execPath, "args", args)
 	cmd.WaitDelay = 10 * time.Second
+	setOpencodeProcessGroup(cmd)
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd
 	}
@@ -78,7 +79,8 @@ func (b *opencodeBackend) Execute(ctx context.Context, prompt string, opts ExecO
 		return nil, fmt.Errorf("start opencode: %w", err)
 	}
 
-	b.cfg.Logger.Info("opencode started", "pid", cmd.Process.Pid, "cwd", opts.Cwd, "model", opts.Model)
+	pgid := getOpencodePgid(cmd.Process.Pid)
+	b.cfg.Logger.Info("opencode started", "pid", cmd.Process.Pid, "pgid", pgid, "cwd", opts.Cwd, "model", opts.Model)
 
 	msgCh := make(chan Message, 256)
 	resCh := make(chan Result, 1)
@@ -99,6 +101,10 @@ func (b *opencodeBackend) Execute(ctx context.Context, prompt string, opts ExecO
 
 		// Wait for process exit.
 		exitErr := cmd.Wait()
+
+		// Wait for any background processes in the same process group.
+		waitForOpencodeChildren(pgid, b.cfg.Logger, runCtx)
+
 		duration := time.Since(startTime)
 
 		if runCtx.Err() == context.DeadlineExceeded {

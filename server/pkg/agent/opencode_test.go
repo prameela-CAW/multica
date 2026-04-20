@@ -1,11 +1,16 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNewReturnsOpencodeBackend(t *testing.T) {
@@ -708,4 +713,59 @@ func TestOpencodeProcessEventsErrorDoesNotRevertToCompleted(t *testing.T) {
 	}
 
 	close(ch)
+}
+
+// TestOpencodeExecuteWaitsForBackgroundChildren verifies that the opencode
+// backend does not send a Result until every process in the opencode process
+// group has exited. This prevents Multica from marking a task complete while
+// background sub-agents spawned by plugins (e.g. oh-my-openagent) are still
+// running.
+func TestOpencodeExecuteWaitsForBackgroundChildren(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("process-group waiting not implemented on Windows")
+	}
+
+	tmpDir := t.TempDir()
+	script := filepath.Join(tmpDir, "fake_opencode")
+
+	// The script prints a valid opencode event and then forks a background
+	// sleep. The parent exits immediately, but the sleep remains in the same
+	// process group. The backend should wait for the sleep to finish before
+	// declaring the task complete.
+	scriptContent := `#!/bin/sh
+echo '{"type":"text","part":{"type":"text","text":"hello from parent"}}'
+sleep 1 &
+`
+	if err := os.WriteFile(script, []byte(scriptContent), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	b := &opencodeBackend{cfg: Config{
+		ExecutablePath: script,
+		Logger:         slog.Default(),
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	session, err := b.Execute(ctx, "test prompt", ExecOptions{})
+	if err != nil {
+		t.Fatalf("Execute error: %v", err)
+	}
+
+	start := time.Now()
+	result := <-session.Result
+	elapsed := time.Since(start)
+
+	if result.Status != "completed" {
+		t.Errorf("status: got %q, want %q", result.Status, "completed")
+	}
+	if result.Output != "hello from parent" {
+		t.Errorf("output: got %q, want %q", result.Output, "hello from parent")
+	}
+	if elapsed < 500*time.Millisecond {
+		t.Errorf("returned too quickly (%v), should have waited for background child", elapsed)
+	}
 }
