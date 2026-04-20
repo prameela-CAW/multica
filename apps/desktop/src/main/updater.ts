@@ -53,12 +53,17 @@ export function setupAutoUpdater(getMainWindow: () => BrowserWindow | null): voi
     try {
       const result = await autoUpdater.checkForUpdates();
       const currentVersion = app.getVersion();
-      const latestVersion = result?.updateInfo.version ?? currentVersion;
+      // Trust electron-updater's own decision rather than re-deriving it from
+      // a version-string compare. The two diverge for pre-release channels,
+      // staged rollouts, downgrades, and minimum-system-version gates — in
+      // those cases updateInfo.version differs from app.getVersion() but no
+      // `update-available` event fires, so showing "available" here would
+      // promise a download prompt that never appears.
       return {
         ok: true,
         currentVersion,
-        latestVersion,
-        available: latestVersion !== currentVersion,
+        latestVersion: result?.updateInfo.version ?? currentVersion,
+        available: result?.isUpdateAvailable ?? false,
       };
     } catch (err) {
       return {
