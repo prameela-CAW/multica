@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowLeft, ArrowRight, Download } from "lucide-react";
+import { captureEvent, setPersonProperties } from "@multica/core/analytics";
 import { Button } from "@multica/ui/components/ui/button";
 import {
   Dialog,
@@ -59,12 +60,17 @@ export function StepPlatformFork({
   onNext,
   onBack,
   cliInstructions,
+  onWaitlistSubmitted,
 }: {
   wsId: string;
   onNext: (runtime: AgentRuntime | null) => void | Promise<void>;
   onBack?: () => void;
   /** Platform-specific CLI install card, rendered inside the CLI dialog. */
   cliInstructions?: ReactNode;
+  /** Parent-level latch used to label the onboarding completion path
+   *  as `cloud_waitlist` when the user ends up skipping Step 3 after
+   *  submitting the waitlist form. */
+  onWaitlistSubmitted?: () => void;
 }) {
   const mainRef = useRef<HTMLElement>(null);
   const fadeStyle = useScrollFade(mainRef);
@@ -90,6 +96,28 @@ export function StepPlatformFork({
   const pickDesktop = () => {
     window.open(DESKTOP_DOWNLOAD_URL, "_blank", "noopener,noreferrer");
     setDownloaded(true);
+    captureEvent("onboarding_runtime_path_selected", {
+      path: "download_desktop",
+      is_mac: isMac,
+    });
+    setPersonProperties({ platform_preference: "desktop" });
+  };
+
+  const handleOpenCli = () => {
+    setDialog("cli");
+    captureEvent("onboarding_runtime_path_selected", {
+      path: "cli",
+      is_mac: isMac,
+    });
+    setPersonProperties({ platform_preference: "web" });
+  };
+
+  const handleOpenCloud = () => {
+    setDialog("cloud");
+    captureEvent("onboarding_runtime_path_selected", {
+      path: "cloud_waitlist",
+      is_mac: isMac,
+    });
   };
 
   const handleCliConnect = () => {
@@ -163,7 +191,7 @@ export function StepPlatformFork({
                 title="Install the CLI"
                 subtitle="Run the Multica daemon yourself — a couple of terminal commands."
                 actionLabel="Show steps"
-                onAction={() => setDialog("cli")}
+                onAction={handleOpenCli}
               />
 
               <ForkAlt
@@ -172,7 +200,7 @@ export function StepPlatformFork({
                 actionLabel={
                   waitlistSubmitted ? "On the list" : "Join waitlist"
                 }
-                onAction={() => setDialog("cloud")}
+                onAction={handleOpenCloud}
               />
             </div>
           </div>
@@ -219,7 +247,10 @@ export function StepPlatformFork({
         open={dialog === "cloud"}
         onClose={() => setDialog(null)}
         submitted={waitlistSubmitted}
-        onSubmitted={() => setWaitlistSubmitted(true)}
+        onSubmitted={() => {
+          setWaitlistSubmitted(true);
+          onWaitlistSubmitted?.();
+        }}
       />
     </div>
   );
