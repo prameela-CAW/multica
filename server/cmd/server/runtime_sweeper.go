@@ -78,7 +78,7 @@ func sweepStaleRuntimes(ctx context.Context, queries *db.Queries, taskSvc *servi
 		slog.Warn("runtime sweeper: failed to clean up stale tasks", "error", err)
 	} else if len(failedTasks) > 0 {
 		slog.Info("runtime sweeper: failed orphaned tasks", "count", len(failedTasks))
-		broadcastFailedTasks(ctx, queries, taskSvc, bus, failedTasks)
+		taskSvc.HandleFailedTasks(ctx, failedTasks)
 	}
 
 	// Notify frontend clients so they re-fetch runtime list.
@@ -145,102 +145,61 @@ func sweepStaleTasks(ctx context.Context, queries *db.Queries, taskSvc *service.
 	}
 
 	slog.Info("task sweeper: failed stale tasks", "count", len(failedTasks))
-	broadcastFailedTasks(ctx, queries, taskSvc, bus, failedTasks)
+	taskSvc.HandleFailedTasks(ctx, failedTasks)
 }
 
-// failedTask is a common interface for both sweeper result types.
-type failedTask struct {
-	Task          db.AgentTaskQueue
-	FailureReason string
-}
-
-// broadcastFailedTasks publishes task:failed events with the correct WorkspaceID
-// and reconciles agent status for all affected agents. It also drives the
-// auto-retry path so orphaned/timed-out tasks transparently spawn a fresh
-// attempt without waiting for the user to click rerun.
-func broadcastFailedTasks(ctx context.Context, queries *db.Queries, taskSvc *service.TaskService, bus *events.Bus, tasks any) {
-	var items []failedTask
-	switch ts := tasks.(type) {
-	case []db.AgentTaskQueue:
-		for _, t := range ts {
-			reason := "agent_error"
-			if t.FailureReason.Valid && t.FailureReason.String != "" {
-				reason = t.FailureReason.String
-			}
-			items = append(items, failedTask{Task: t, FailureReason: reason})
-		}
+// broadcastFailedTasks is preserved as a thin shim for the integration tests
+// in this package. New call sites should use TaskService.HandleFailedTasks
+// directly so the side effects (event broadcast, agent reconcile, issue
+// rollback, auto-retry) are guaranteed in one place.
+func broadcastFailedTasks(ctx context.Context, queries *db.Queries, taskSvc *service.TaskService, bus *events.Bus, tasks []db.AgentTaskQueue) {
+	if taskSvc != nil {
+		taskSvc.HandleFailedTasks(ctx, tasks)
+		return
 	}
-
-	affectedAgents := make(map[string]pgtype.UUID)
+	// Fallback path used by tests that don't construct a TaskService:
+	// publish task:failed events with workspace IDs and reset stuck issues.
 	processedIssues := make(map[string]bool)
-	retriedIssues := make(map[string]bool)
-
-	for _, ft := range items {
-		// Try auto-retry first so the issue stays in_progress rather than
-		// flapping todo → in_progress within a tick.
-		if taskSvc != nil {
-			if child, _ := taskSvc.MaybeRetryFailedTask(ctx, ft.Task); child != nil && ft.Task.IssueID.Valid {
-				retriedIssues[util.UUIDToString(ft.Task.IssueID)] = true
-			}
+	affectedAgents := make(map[string]pgtype.UUID)
+	for _, t := range tasks {
+		failureReason := "agent_error"
+		if t.FailureReason.Valid && t.FailureReason.String != "" {
+			failureReason = t.FailureReason.String
 		}
-
-		// Look up workspace ID from the issue so the event reaches the right WS room.
 		workspaceID := ""
-		if ft.Task.IssueID.Valid {
-			if issue, err := queries.GetIssue(ctx, ft.Task.IssueID); err == nil {
+		if t.IssueID.Valid {
+			if issue, err := queries.GetIssue(ctx, t.IssueID); err == nil {
 				workspaceID = util.UUIDToString(issue.WorkspaceID)
-				// If the issue is still in_progress and no other active tasks remain,
-				// reset it back to todo so the daemon can pick it up again. Skip
-				// when we just enqueued a retry — the new task will keep the
-				// issue in_progress soon, no need to flap.
-				issueKey := util.UUIDToString(ft.Task.IssueID)
-				if issue.Status == "in_progress" && !processedIssues[issueKey] && !retriedIssues[issueKey] {
+				issueKey := util.UUIDToString(t.IssueID)
+				if issue.Status == "in_progress" && !processedIssues[issueKey] {
 					processedIssues[issueKey] = true
-					hasActive, checkErr := queries.HasActiveTaskForIssue(ctx, ft.Task.IssueID)
-					if checkErr != nil {
-						slog.Warn("runtime sweeper: failed to check active tasks for issue",
-							"issue_id", issueKey,
-							"error", checkErr,
-						)
-					} else if !hasActive {
-						if _, updateErr := queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{
-							ID:     ft.Task.IssueID,
-							Status: "todo",
-						}); updateErr != nil {
-							slog.Warn("runtime sweeper: failed to reset stuck issue to todo",
-								"issue_id", issueKey,
-								"error", updateErr,
-							)
-						}
+					if hasActive, herr := queries.HasActiveTaskForIssue(ctx, t.IssueID); herr == nil && !hasActive {
+						queries.UpdateIssueStatus(ctx, db.UpdateIssueStatusParams{ID: t.IssueID, Status: "todo"})
 					}
 				}
 			}
 		}
-
 		bus.Publish(events.Event{
 			Type:        protocol.EventTaskFailed,
 			WorkspaceID: workspaceID,
 			ActorType:   "system",
 			Payload: map[string]any{
-				"task_id":        util.UUIDToString(ft.Task.ID),
-				"agent_id":       util.UUIDToString(ft.Task.AgentID),
-				"issue_id":       util.UUIDToString(ft.Task.IssueID),
+				"task_id":        util.UUIDToString(t.ID),
+				"agent_id":       util.UUIDToString(t.AgentID),
+				"issue_id":       util.UUIDToString(t.IssueID),
 				"status":         "failed",
-				"failure_reason": ft.FailureReason,
+				"failure_reason": failureReason,
 			},
 		})
-
-		agentKey := util.UUIDToString(ft.Task.AgentID)
-		affectedAgents[agentKey] = ft.Task.AgentID
+		affectedAgents[util.UUIDToString(t.AgentID)] = t.AgentID
 	}
-
-	// Reconcile status for each affected agent.
 	for _, agentID := range affectedAgents {
 		reconcileAgentStatus(ctx, queries, bus, agentID)
 	}
 }
 
 // reconcileAgentStatus checks running task count and updates agent status.
+// Used only by the test-fallback path of broadcastFailedTasks above.
 func reconcileAgentStatus(ctx context.Context, queries *db.Queries, bus *events.Bus, agentID pgtype.UUID) {
 	running, err := queries.CountRunningTasks(ctx, agentID)
 	if err != nil {

@@ -33,12 +33,12 @@ func (h *Handler) RecoverOrphanedTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	retried := 0
-	for _, t := range rows {
-		if child, _ := h.TaskService.MaybeRetryFailedTask(r.Context(), t); child != nil {
-			retried++
-		}
-	}
+	// Funnel through the shared post-failure pipeline so we get the same
+	// task:failed events, agent reconcile, issue rollback, and auto-retry
+	// behaviour as the runtime sweeper. This was previously a fast-path
+	// that bypassed those side effects, leaving the UI stale when no retry
+	// was created (max_attempts exhausted, autopilot, non-retryable reason).
+	retried := h.TaskService.HandleFailedTasks(r.Context(), rows)
 
 	if len(rows) > 0 {
 		slog.Info("recover-orphans completed",
