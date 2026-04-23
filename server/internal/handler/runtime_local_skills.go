@@ -524,11 +524,19 @@ func (h *Handler) ReportLocalSkillListResult(w http.ResponseWriter, r *http.Requ
 			supported = *body.Supported
 		}
 		if err := h.LocalSkillListStore.Complete(r.Context(), requestID, body.Skills, supported); err != nil {
-			slog.Warn("local skills Complete failed", "error", err, "request_id", requestID)
+			// Surface the store failure as 5xx so the daemon can retry instead
+			// of swallowing the report (leaves the request stuck in running
+			// until the server-side timeout, which is exactly the "looks OK but
+			// nothing happens" class of bug we're trying to avoid).
+			slog.Error("local skills Complete failed", "error", err, "request_id", requestID)
+			writeError(w, http.StatusInternalServerError, "failed to persist completion")
+			return
 		}
 	} else {
 		if err := h.LocalSkillListStore.Fail(r.Context(), requestID, body.Error); err != nil {
-			slog.Warn("local skills Fail failed", "error", err, "request_id", requestID)
+			slog.Error("local skills Fail failed", "error", err, "request_id", requestID)
+			writeError(w, http.StatusInternalServerError, "failed to persist failure")
+			return
 		}
 	}
 
@@ -571,14 +579,18 @@ func (h *Handler) ReportLocalSkillImportResult(w http.ResponseWriter, r *http.Re
 
 	if body.Status != "completed" {
 		if err := h.LocalSkillImportStore.Fail(r.Context(), requestID, body.Error); err != nil {
-			slog.Warn("local skill import Fail failed", "error", err, "request_id", requestID)
+			slog.Error("local skill import Fail failed", "error", err, "request_id", requestID)
+			writeError(w, http.StatusInternalServerError, "failed to persist failure")
+			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 	if body.Skill == nil {
 		if err := h.LocalSkillImportStore.Fail(r.Context(), requestID, "daemon returned an empty skill bundle"); err != nil {
-			slog.Warn("local skill import Fail failed", "error", err, "request_id", requestID)
+			slog.Error("local skill import Fail failed", "error", err, "request_id", requestID)
+			writeError(w, http.StatusInternalServerError, "failed to persist failure")
+			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
@@ -623,14 +635,27 @@ func (h *Handler) ReportLocalSkillImportResult(w http.ResponseWriter, r *http.Re
 			failMsg = "a skill with this name already exists"
 		}
 		if ferr := h.LocalSkillImportStore.Fail(r.Context(), requestID, failMsg); ferr != nil {
-			slog.Warn("local skill import Fail failed", "error", ferr, "request_id", requestID)
+			slog.Error("local skill import Fail failed", "error", ferr, "request_id", requestID)
+			writeError(w, http.StatusInternalServerError, "failed to persist failure")
+			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
 	}
 
 	if err := h.LocalSkillImportStore.Complete(r.Context(), requestID, resp.SkillResponse); err != nil {
-		slog.Warn("local skill import Complete failed", "error", err, "request_id", requestID)
+		// We already wrote the Skill to Postgres. If the store-side Complete
+		// fails we can't leave that Skill orphaned: the daemon will retry on
+		// 5xx and re-create it, which blows up on the unique-name constraint
+		// and looks to the user like "import keeps failing". Roll back our
+		// side-effects so the retry lands on a clean slate.
+		slog.Error("local skill import Complete failed — rolling back created skill",
+			"error", err, "request_id", requestID, "skill_id", resp.ID)
+		if delErr := h.Queries.DeleteSkill(r.Context(), parseUUID(resp.ID)); delErr != nil {
+			slog.Warn("orphan skill rollback failed", "error", delErr, "skill_id", resp.ID)
+		}
+		writeError(w, http.StatusInternalServerError, "failed to persist import completion")
+		return
 	}
 	h.publish(protocol.EventSkillCreated, uuidToString(rt.WorkspaceID), "member", req.CreatorID, map[string]any{"skill": resp})
 	slog.Debug("runtime local skill imported", "runtime_id", runtimeID, "request_id", requestID, "skill_id", resp.ID)

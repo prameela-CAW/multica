@@ -310,6 +310,52 @@ func TestRedisLocalSkillListStore_PerRuntimeIsolation(t *testing.T) {
 	}
 }
 
+// TestRedisLocalSkillListStore_PopPendingAtomicClaim pins the PR-1557 review
+// fix: the claim (ZREM pending + persist running record) MUST land as one
+// atomic unit. If the old two-step ordering came back ("ZRem first, SET
+// second") a transient error between the two would strand the request — not
+// in pending, still serialised as "pending" on disk, never re-dispatched.
+//
+// We verify the happy-path invariant end-to-end: after one PopPending the
+// record is in "running" state AND a second PopPending on the same runtime
+// returns nothing (i.e. the pending zset no longer references the id).
+func TestRedisLocalSkillListStore_PopPendingAtomicClaim(t *testing.T) {
+	rdb := newRedisTestClient(t)
+	ctx := context.Background()
+	store := NewRedisLocalSkillListStore(rdb)
+
+	req, err := store.Create(ctx, "runtime-atomic")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	popped, err := store.PopPending(ctx, "runtime-atomic")
+	if err != nil {
+		t.Fatalf("pop: %v", err)
+	}
+	if popped == nil || popped.ID != req.ID {
+		t.Fatalf("pop returned wrong request: %+v", popped)
+	}
+
+	got, err := store.Get(ctx, req.ID)
+	if err != nil {
+		t.Fatalf("get after pop: %v", err)
+	}
+	if got.Status != RuntimeLocalSkillRunning {
+		t.Fatalf("record status = %s, want running", got.Status)
+	}
+
+	// The pending queue must no longer reference the claimed id — exposed
+	// via PopPending rather than poking the zset directly.
+	again, err := store.PopPending(ctx, "runtime-atomic")
+	if err != nil {
+		t.Fatalf("second pop: %v", err)
+	}
+	if again != nil {
+		t.Fatalf("second pop should be empty, got %+v", again)
+	}
+}
+
 // Compile-time assertions: the Redis stores MUST satisfy the interfaces so
 // NewRouter's assignment stays type-safe.
 var (

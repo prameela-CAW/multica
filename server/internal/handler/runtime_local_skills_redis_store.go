@@ -20,22 +20,42 @@ import (
 //
 // PopPending is the critical multi-node primitive. It MUST atomically:
 //  1. pick the oldest pending request id for this runtime
-//  2. read and update its record to "running"
+//  2. claim it (remove from the pending zset) AND transition its record to
+//     "running" in a single step — otherwise a crash / transient Redis error
+//     between the two writes strands the request (no longer pending, record
+//     still says pending; no node will ever re-dispatch it).
 //
-// Redis WATCH/MULTI/EXEC gives us that without a Lua script: the transaction
-// aborts if another node modifies either key between WATCH and EXEC, so we
-// retry. In practice two nodes almost never race for the same runtime (each
-// runtime only has one daemon heartbeating), and the few ZPOPMIN fallbacks
-// below catch the rest.
+// Doing this as two round-trips is racy; we use a Lua script so Redis runs
+// ZREM + SET atomically server-side. If ZREM returns 0 (another node already
+// claimed it), the SET is skipped. This is the fix for the PR-1557 review
+// finding about the "request disappears under Redis hiccups" path.
 
 const (
 	// Namespaced so we don't collide with the realtime relay's ws:* keys.
-	localSkillListKeyPrefix         = "mul:local_skill:list:"
-	localSkillListPendingPrefix     = "mul:local_skill:list:pending:"
-	localSkillImportKeyPrefix       = "mul:local_skill:import:"
-	localSkillImportPendingPrefix   = "mul:local_skill:import:pending:"
-	localSkillRedisPopMaxRetries    = 5
+	localSkillListKeyPrefix       = "mul:local_skill:list:"
+	localSkillListPendingPrefix   = "mul:local_skill:list:pending:"
+	localSkillImportKeyPrefix     = "mul:local_skill:import:"
+	localSkillImportPendingPrefix = "mul:local_skill:import:pending:"
+	localSkillRedisPopMaxRetries  = 5
 )
+
+// claimPendingScript atomically claims a pending request:
+//   KEYS[1] = pending zset    ARGV[1] = request id to claim
+//   KEYS[2] = record key       ARGV[2] = new record JSON (status=running)
+//                              ARGV[3] = record TTL in seconds
+//
+// Returns 1 when this caller won the claim (zset entry removed, record
+// updated), 0 when the entry was already gone (another node won).
+// Either the ZREM and the SET both happen or neither does — Redis executes
+// a Lua script as a single atomic unit.
+var claimPendingScript = redis.NewScript(`
+local removed = redis.call('ZREM', KEYS[1], ARGV[1])
+if removed == 0 then
+    return 0
+end
+redis.call('SET', KEYS[2], ARGV[2], 'EX', tonumber(ARGV[3]))
+return 1
+`)
 
 func localSkillListKey(id string) string            { return localSkillListKeyPrefix + id }
 func localSkillListPendingKey(runtimeID string) string {
@@ -160,25 +180,28 @@ func (s *RedisLocalSkillListStore) PopPending(ctx context.Context, runtimeID str
 			continue
 		}
 
-		// Race guard: remove the id from the pending zset atomically-ish. Only
-		// the node whose ZRem returns 1 "wins" the claim; losers retry. Note
-		// we deliberately ZRem BEFORE overwriting the record so two winners
-		// never see Status=Pending in the persisted JSON at the same time.
-		removed, err := s.rdb.ZRem(ctx, pendingKey, id).Result()
-		if err != nil {
-			return nil, fmt.Errorf("zrem pending: %w", err)
-		}
-		if removed == 0 {
-			// Someone else popped it first.
-			continue
-		}
-
 		now := time.Now()
 		req.Status = RuntimeLocalSkillRunning
 		req.RunStartedAt = &now
 		req.UpdatedAt = now
-		if err := s.persistListRequest(ctx, req); err != nil {
-			return nil, err
+		data, err := json.Marshal(req)
+		if err != nil {
+			return nil, fmt.Errorf("marshal list request: %w", err)
+		}
+
+		result, err := claimPendingScript.Run(
+			ctx, s.rdb,
+			[]string{pendingKey, localSkillListKey(id)},
+			id, data, int(runtimeLocalSkillStoreRetention.Seconds()),
+		).Int64()
+		if err != nil {
+			return nil, fmt.Errorf("claim pending: %w", err)
+		}
+		if result == 0 {
+			// Another node won the race. The record still says pending and is
+			// owned by the winner; we just retry to pick up whatever else is
+			// queued (or nothing).
+			continue
 		}
 		return req, nil
 	}
@@ -355,20 +378,25 @@ func (s *RedisLocalSkillImportStore) PopPending(ctx context.Context, runtimeID s
 			continue
 		}
 
-		removed, err := s.rdb.ZRem(ctx, pendingKey, id).Result()
-		if err != nil {
-			return nil, fmt.Errorf("zrem pending: %w", err)
-		}
-		if removed == 0 {
-			continue
-		}
-
 		now := time.Now()
 		req.Status = RuntimeLocalSkillRunning
 		req.RunStartedAt = &now
 		req.UpdatedAt = now
-		if err := s.persistImportRequest(ctx, req); err != nil {
+		data, err := s.marshalImport(req)
+		if err != nil {
 			return nil, err
+		}
+
+		result, err := claimPendingScript.Run(
+			ctx, s.rdb,
+			[]string{pendingKey, localSkillImportKey(id)},
+			id, data, int(runtimeLocalSkillStoreRetention.Seconds()),
+		).Int64()
+		if err != nil {
+			return nil, fmt.Errorf("claim pending: %w", err)
+		}
+		if result == 0 {
+			continue
 		}
 		return req, nil
 	}
