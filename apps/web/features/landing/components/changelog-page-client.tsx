@@ -230,7 +230,7 @@ export function ChangelogPageClient() {
                                   />
                                   <span
                                     className={[
-                                      "tabular-nums",
+                                      "w-[1.25rem] shrink-0 text-right tabular-nums",
                                       isActive
                                         ? "font-semibold"
                                         : "font-medium",
