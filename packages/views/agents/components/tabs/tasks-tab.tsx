@@ -1,20 +1,22 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { ListTodo } from "lucide-react";
-import type { Agent, AgentTask } from "@multica/core/types";
+import type { Agent, AgentTask, Issue } from "@multica/core/types";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { api } from "@multica/core/api";
 import { useWorkspaceId } from "@multica/core/hooks";
-import { issueListOptions } from "@multica/core/issues/queries";
-import { useQuery } from "@tanstack/react-query";
+import { useWorkspacePaths } from "@multica/core/paths";
+import { issueDetailOptions } from "@multica/core/issues/queries";
+import { useQueries } from "@tanstack/react-query";
+import { AppLink } from "../../../navigation";
 import { taskStatusConfig } from "../../config";
 
 export function TasksTab({ agent }: { agent: Agent }) {
   const [tasks, setTasks] = useState<AgentTask[]>([]);
   const [loading, setLoading] = useState(true);
   const wsId = useWorkspaceId();
-  const { data: issues = [] } = useQuery(issueListOptions(wsId));
+  const paths = useWorkspacePaths();
 
   useEffect(() => {
     setLoading(true);
@@ -24,6 +26,33 @@ export function TasksTab({ agent }: { agent: Agent }) {
       .catch(() => setTasks([]))
       .finally(() => setLoading(false));
   }, [agent.id]);
+
+  // Resolve each task's issue via its own cached detail query. A task's
+  // issue may or may not be in the paginated issue-list cache, so going
+  // through `issueDetailOptions` is the reliable lookup path (and it shares
+  // the same cache as the issue detail page).
+  //
+  // Not every task has a linked issue — autopilot `run_only` runs and
+  // chat-spawned tasks both persist with NULL issue_id, which the server
+  // serializes as "". Filter those out before issuing detail queries so we
+  // don't hit `/api/issues/` with an empty id (which was crashing the
+  // whole tab). The UI treats the two cases the same here; a follow-up
+  // will surface the task source once the server exposes it.
+  const issueIds = useMemo(
+    () => Array.from(new Set(tasks.map((t) => t.issue_id).filter((id) => id !== ""))),
+    [tasks],
+  );
+  const issueQueries = useQueries({
+    queries: issueIds.map((id) => issueDetailOptions(wsId, id)),
+  });
+  const issueMap = useMemo(() => {
+    const map = new Map<string, Issue>();
+    issueQueries.forEach((q, i) => {
+      const id = issueIds[i]!;
+      if (q.data) map.set(id, q.data);
+    });
+    return map;
+  }, [issueQueries, issueIds]);
 
   if (loading) {
     return (
@@ -55,8 +84,6 @@ export function TasksTab({ agent }: { agent: Agent }) {
     return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
   });
 
-  const issueMap = new Map(issues.map((i) => [i.id, i]));
-
   return (
     <div className="space-y-4">
       <div>
@@ -79,21 +106,30 @@ export function TasksTab({ agent }: { agent: Agent }) {
           {sortedTasks.map((task) => {
             const config = taskStatusConfig[task.status] ?? taskStatusConfig.queued!;
             const Icon = config.icon;
-            const issue = issueMap.get(task.issue_id);
+            // Tasks without a linked issue carry issue_id = "" — skip the
+            // detail lookup and render them as non-link rows. The source
+            // label is picked from chat_session_id / autopilot_run_id,
+            // which the server populates for chat- and autopilot-spawned
+            // tasks respectively.
+            const hasIssue = task.issue_id !== "";
+            const issue = hasIssue ? issueMap.get(task.issue_id) : undefined;
+            const sourcelessLabel = task.chat_session_id
+              ? "Chat session"
+              : task.autopilot_run_id
+                ? "Autopilot run"
+                : "Task without linked issue";
             const isActive = task.status === "running" || task.status === "dispatched";
             const isRunning = task.status === "running";
+            const rowClassName = `flex items-center gap-3 rounded-lg border px-4 py-3 transition-shadow hover:shadow-sm ${
+              isRunning
+                ? "border-success/40 bg-success/5"
+                : task.status === "dispatched"
+                  ? "border-info/40 bg-info/5"
+                  : ""
+            }`;
 
-            return (
-              <div
-                key={task.id}
-                className={`flex items-center gap-3 rounded-lg border px-4 py-3 ${
-                  isRunning
-                    ? "border-success/40 bg-success/5"
-                    : task.status === "dispatched"
-                      ? "border-info/40 bg-info/5"
-                      : ""
-                }`}
-              >
+            const content = (
+              <>
                 <Icon
                   className={`h-4 w-4 shrink-0 ${config.color} ${
                     isRunning ? "animate-spin" : ""
@@ -107,10 +143,10 @@ export function TasksTab({ agent }: { agent: Agent }) {
                       </span>
                     )}
                     <span className={`text-sm truncate ${isActive ? "font-medium" : ""}`}>
-                      {issue?.title ?? `Issue ${task.issue_id.slice(0, 8)}...`}
+                      {issue?.title ?? (hasIssue ? `Issue ${task.issue_id.slice(0, 8)}...` : sourcelessLabel)}
                     </span>
                   </div>
-                  <div className="text-xs text-muted-foreground mt-0.5">
+                  <div className="mt-0.5 text-xs text-muted-foreground">
                     {isRunning && task.started_at
                       ? `Started ${new Date(task.started_at).toLocaleString()}`
                       : task.status === "dispatched" && task.dispatched_at
@@ -125,7 +161,25 @@ export function TasksTab({ agent }: { agent: Agent }) {
                 <span className={`shrink-0 text-xs font-medium ${config.color}`}>
                   {config.label}
                 </span>
-              </div>
+              </>
+            );
+
+            if (!hasIssue) {
+              return (
+                <div key={task.id} className={rowClassName}>
+                  {content}
+                </div>
+              );
+            }
+
+            return (
+              <AppLink
+                key={task.id}
+                href={paths.issueDetail(task.issue_id)}
+                className={`${rowClassName} text-foreground no-underline hover:no-underline`}
+              >
+                {content}
+              </AppLink>
             );
           })}
         </div>

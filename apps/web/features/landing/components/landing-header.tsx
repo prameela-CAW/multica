@@ -45,7 +45,7 @@ export function LandingHeader({
 
         <div className="flex items-center gap-2.5 sm:gap-3">
           <Link
-            href={user ? "/issues" : "/login"}
+            href={user ? "/" : "/login"}
             className={headerButtonClassName("solid", variant)}
           >
             {user ? t.header.dashboard : t.header.login}

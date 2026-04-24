@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -11,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -20,6 +23,14 @@ import (
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
+
+// randomID returns a random 16-byte hex string used as a request ID for
+// in-memory stores (model list, local skills, CLI update, etc.).
+func randomID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
 
 type txStarter interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
@@ -31,41 +42,59 @@ type dbExecutor interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-type Handler struct {
-	Queries          *db.Queries
-	DB               dbExecutor
-	TxStarter        txStarter
-	Hub              *realtime.Hub
-	Bus              *events.Bus
-	TaskService      *service.TaskService
-	AutopilotService *service.AutopilotService
-	EmailService     *service.EmailService
-	PingStore        *PingStore
-	UpdateStore      *UpdateStore
-	Storage          storage.Storage
-	CFSigner         *auth.CloudFrontSigner
+type Config struct {
+	AllowSignup         bool
+	AllowedEmails       []string
+	AllowedEmailDomains []string
 }
 
-func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner) *Handler {
+type Handler struct {
+	Queries               *db.Queries
+	DB                    dbExecutor
+	TxStarter             txStarter
+	Hub                   *realtime.Hub
+	Bus                   *events.Bus
+	TaskService           *service.TaskService
+	AutopilotService      *service.AutopilotService
+	EmailService          *service.EmailService
+	UpdateStore           *UpdateStore
+	ModelListStore        *ModelListStore
+	LocalSkillListStore   LocalSkillListStore
+	LocalSkillImportStore LocalSkillImportStore
+	Storage               storage.Storage
+	CFSigner              *auth.CloudFrontSigner
+	Analytics             analytics.Client
+	cfg                   Config
+}
+
+func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config) *Handler {
 	var executor dbExecutor
 	if candidate, ok := txStarter.(dbExecutor); ok {
 		executor = candidate
 	}
 
-	taskSvc := service.NewTaskService(queries, hub, bus)
+	if analyticsClient == nil {
+		analyticsClient = analytics.NoopClient{}
+	}
+
+	taskSvc := service.NewTaskService(queries, txStarter, hub, bus)
 	return &Handler{
-		Queries:          queries,
-		DB:               executor,
-		TxStarter:        txStarter,
-		Hub:              hub,
-		Bus:              bus,
-		TaskService:      taskSvc,
-		AutopilotService: service.NewAutopilotService(queries, txStarter, bus, taskSvc),
-		EmailService:     emailService,
-		PingStore:        NewPingStore(),
-		UpdateStore:      NewUpdateStore(),
-		Storage:          store,
-		CFSigner:         cfSigner,
+		Queries:               queries,
+		DB:                    executor,
+		TxStarter:             txStarter,
+		Hub:                   hub,
+		Bus:                   bus,
+		TaskService:           taskSvc,
+		AutopilotService:      service.NewAutopilotService(queries, txStarter, bus, taskSvc),
+		EmailService:          emailService,
+		UpdateStore:           NewUpdateStore(),
+		ModelListStore:        NewModelListStore(),
+		LocalSkillListStore:   NewInMemoryLocalSkillListStore(),
+		LocalSkillImportStore: NewInMemoryLocalSkillImportStore(),
+		Storage:               store,
+		CFSigner:              cfSigner,
+		Analytics:             analyticsClient,
+		cfg:                   cfg,
 	}
 }
 
@@ -97,6 +126,32 @@ func (h *Handler) publish(eventType, workspaceID, actorType, actorID string, pay
 		ActorType:   actorType,
 		ActorID:     actorID,
 		Payload:     payload,
+	})
+}
+
+// publishTask is publish() plus a TaskID hint so the realtime layer can route
+// the event to the per-task scope rather than the whole workspace.
+func (h *Handler) publishTask(eventType, workspaceID, actorType, actorID, taskID string, payload any) {
+	h.Bus.Publish(events.Event{
+		Type:        eventType,
+		WorkspaceID: workspaceID,
+		ActorType:   actorType,
+		ActorID:     actorID,
+		TaskID:      taskID,
+		Payload:     payload,
+	})
+}
+
+// publishChat is publish() plus a ChatSessionID hint so the realtime layer
+// can route the event to the per-chat-session scope.
+func (h *Handler) publishChat(eventType, workspaceID, actorType, actorID, chatSessionID string, payload any) {
+	h.Bus.Publish(events.Event{
+		Type:          eventType,
+		WorkspaceID:   workspaceID,
+		ActorType:     actorType,
+		ActorID:       actorID,
+		ChatSessionID: chatSessionID,
+		Payload:       payload,
 	})
 }
 
@@ -152,16 +207,15 @@ func requireUserID(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return userID, true
 }
 
-func resolveWorkspaceID(r *http.Request) string {
-	// Prefer context value set by workspace middleware.
-	if id := middleware.WorkspaceIDFromContext(r.Context()); id != "" {
-		return id
-	}
-	workspaceID := r.URL.Query().Get("workspace_id")
-	if workspaceID != "" {
-		return workspaceID
-	}
-	return r.Header.Get("X-Workspace-ID")
+// resolveWorkspaceID returns the workspace UUID for this request. Delegates
+// to middleware.ResolveWorkspaceIDFromRequest so middleware-protected routes
+// and middleware-less routes (e.g. /api/upload-file) share identical
+// resolution behavior — including slug → UUID translation via the DB.
+//
+// Returns "" when no workspace identifier was provided or a slug was provided
+// but doesn't match any workspace.
+func (h *Handler) resolveWorkspaceID(r *http.Request) string {
+	return middleware.ResolveWorkspaceIDFromRequest(r, h.Queries)
 }
 
 // ctxMember returns the workspace member from context (set by workspace middleware).
@@ -272,7 +326,7 @@ func (h *Handler) loadIssueForUser(w http.ResponseWriter, r *http.Request, issue
 		return db.Issue{}, false
 	}
 
-	workspaceID := resolveWorkspaceID(r)
+	workspaceID := h.resolveWorkspaceID(r)
 	if workspaceID == "" {
 		writeError(w, http.StatusBadRequest, "workspace_id is required")
 		return db.Issue{}, false
@@ -362,7 +416,7 @@ func (h *Handler) loadAgentForUser(w http.ResponseWriter, r *http.Request, agent
 		return db.Agent{}, false
 	}
 
-	workspaceID := resolveWorkspaceID(r)
+	workspaceID := h.resolveWorkspaceID(r)
 	if workspaceID == "" {
 		writeError(w, http.StatusBadRequest, "workspace_id is required")
 		return db.Agent{}, false
@@ -385,7 +439,7 @@ func (h *Handler) loadInboxItemForUser(w http.ResponseWriter, r *http.Request, i
 		return db.InboxItem{}, false
 	}
 
-	workspaceID := resolveWorkspaceID(r)
+	workspaceID := h.resolveWorkspaceID(r)
 	if workspaceID == "" {
 		writeError(w, http.StatusBadRequest, "workspace_id is required")
 		return db.InboxItem{}, false

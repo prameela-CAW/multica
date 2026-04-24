@@ -316,6 +316,36 @@ function bundledCliPath(): string {
   );
 }
 
+async function probeCliBinary(
+  bin: string,
+  source: "bundled" | "managed" | "path",
+): Promise<string | null> {
+  try {
+    const stdout = await new Promise<string>((resolve, reject) => {
+      execFile(
+        bin,
+        ["version", "--output", "json"],
+        { timeout: 5_000 },
+        (err, out) => {
+          if (err) reject(err);
+          else resolve(out);
+        },
+      );
+    });
+    const parsed = JSON.parse(stdout) as { version?: string };
+    if (typeof parsed.version === "string" && parsed.version.length > 0) {
+      return parsed.version;
+    }
+    console.warn(
+      `[daemon] ignoring ${source} CLI at ${bin}: version output was missing or invalid`,
+    );
+    return null;
+  } catch (err) {
+    console.warn(`[daemon] ignoring ${source} CLI at ${bin}:`, err);
+    return null;
+  }
+}
+
 /**
  * Returns a usable `multica` binary path. Priority:
  *   1. Cached result from a previous successful resolve.
@@ -339,27 +369,55 @@ async function resolveCliBinary(): Promise<string | null> {
   cliResolvePromise = (async () => {
     const bundled = bundledCliPath();
     if (existsSync(bundled)) {
-      console.log(`[daemon] using bundled CLI at ${bundled}`);
-      cachedCliBinary = bundled;
-      return bundled;
+      const version = await probeCliBinary(bundled, "bundled");
+      if (version) {
+        console.log(`[daemon] using bundled CLI at ${bundled}`);
+        cachedCliBinary = bundled;
+        cachedCliBinaryVersion = version;
+        return bundled;
+      }
     }
 
     const managed = managedCliPath();
     if (existsSync(managed)) {
-      cachedCliBinary = managed;
-      return managed;
+      const version = await probeCliBinary(managed, "managed");
+      if (version) {
+        cachedCliBinary = managed;
+        cachedCliBinaryVersion = version;
+        return managed;
+      }
     }
 
     try {
-      const installed = await ensureManagedCli();
-      cachedCliBinary = installed;
-      return installed;
+      const installed = await ensureManagedCli({
+        forceInstall: existsSync(managed),
+      });
+      const version = await probeCliBinary(installed, "managed");
+      if (version) {
+        cachedCliBinary = installed;
+        cachedCliBinaryVersion = version;
+        return installed;
+      }
+      console.warn(
+        `[daemon] managed CLI at ${installed} failed validation after install`,
+      );
     } catch (err) {
       console.warn("[daemon] CLI auto-install failed, falling back to PATH:", err);
-      const onPath = findCliOnPath();
-      cachedCliBinary = onPath;
-      return onPath;
     }
+
+    const onPath = findCliOnPath();
+    if (onPath) {
+      const version = await probeCliBinary(onPath, "path");
+      if (version) {
+        cachedCliBinary = onPath;
+        cachedCliBinaryVersion = version;
+        return onPath;
+      }
+    }
+
+    cachedCliBinary = null;
+    cachedCliBinaryVersion = null;
+    return null;
   })();
 
   try {
@@ -370,11 +428,10 @@ async function resolveCliBinary(): Promise<string | null> {
 }
 
 /**
- * Reads the version of the currently resolved CLI binary by invoking
- * `multica version --output json`. Cached for the process lifetime — the
- * bundled binary doesn't change after `bundle-cli.mjs` runs at dev/build time.
+ * Reads the version of the currently resolved CLI binary. Cached for the
+ * process lifetime — the bundled binary doesn't change after bundle time.
  * Returns null on any failure (unknown `go` at bundle time, broken binary,
- * etc.) so callers can fail open.
+ * wrong-arch bundled binary, etc.) so callers can fail open.
  */
 async function getCliBinaryVersion(): Promise<string | null> {
   if (cachedCliBinaryVersion !== undefined) return cachedCliBinaryVersion;
@@ -383,24 +440,7 @@ async function getCliBinaryVersion(): Promise<string | null> {
     cachedCliBinaryVersion = null;
     return null;
   }
-  try {
-    const stdout = await new Promise<string>((resolve, reject) => {
-      execFile(
-        bin,
-        ["version", "--output", "json"],
-        { timeout: 5_000 },
-        (err, out) => {
-          if (err) reject(err);
-          else resolve(out);
-        },
-      );
-    });
-    const parsed = JSON.parse(stdout) as { version?: string };
-    cachedCliBinaryVersion = parsed.version ?? null;
-  } catch (err) {
-    console.warn("[daemon] failed to read CLI binary version:", err);
-    cachedCliBinaryVersion = null;
-  }
+  cachedCliBinaryVersion = await probeCliBinary(bin, "path");
   return cachedCliBinaryVersion;
 }
 
@@ -598,11 +638,12 @@ function profileArgs(active: ActiveProfile): string[] {
 
 // Env passed to every CLI child so the daemon process knows it was spawned
 // by the Desktop app. The server uses this to mark runtimes as managed and
-// hide CLI self-update UI.
-const DESKTOP_SPAWN_ENV = {
-  ...process.env,
-  MULTICA_LAUNCHED_BY: "desktop",
-};
+// hide CLI self-update UI. Computed lazily so it picks up the PATH fix
+// applied by fix-path in main/index.ts — as a top-level const it would
+// snapshot process.env at import time, before that block runs.
+function desktopSpawnEnv(): NodeJS.ProcessEnv {
+  return { ...process.env, MULTICA_LAUNCHED_BY: "desktop" };
+}
 
 async function startDaemon(): Promise<{ success: boolean; error?: string }> {
   const bin = await resolveCliBinary();
@@ -624,7 +665,7 @@ async function startDaemon(): Promise<{ success: boolean; error?: string }> {
     execFile(
       bin,
       args,
-      { timeout: 20_000, env: DESKTOP_SPAWN_ENV },
+      { timeout: 20_000, env: desktopSpawnEnv() },
       (err) => {
         if (err) {
           currentState = "stopped";

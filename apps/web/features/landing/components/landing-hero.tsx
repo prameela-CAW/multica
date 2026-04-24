@@ -38,17 +38,17 @@ export function LandingHero() {
             </p>
 
             <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-              <Link href={user ? "/issues" : "/login"} className={heroButtonClassName("solid")}>
+              <Link href={user ? "/" : "/login"} className={heroButtonClassName("solid")}>
                 {user ? t.header.dashboard : t.hero.cta}
               </Link>
             </div>
           </div>
 
-          <div className="mt-10 flex items-center justify-center gap-8">
+          <div className="mt-10 flex flex-wrap items-center justify-center gap-x-6 gap-y-3">
             <span className="text-[15px] text-white/50">
               {t.hero.worksWith}
             </span>
-            <div className="flex items-center gap-6">
+            <div className="flex flex-wrap items-center justify-center gap-x-5 gap-y-3">
               <div className="flex items-center gap-2.5 text-white/80">
                 <ClaudeCodeLogo className="size-5" />
                 <span className="text-[15px] font-medium">Claude Code</span>
@@ -88,7 +88,6 @@ function LandingBackdrop() {
         src="/images/landing-bg.jpg"
         alt=""
         fill
-        priority
         className="object-cover object-center"
       />
     </div>
@@ -104,6 +103,7 @@ function ProductImage({ alt }: { alt: string }) {
           alt={alt}
           width={3532}
           height={2382}
+          priority
           className="block h-auto w-full"
           sizes="(max-width: 1320px) 100vw, 1320px"
           quality={85}

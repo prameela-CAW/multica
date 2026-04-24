@@ -35,6 +35,7 @@ import {
 import { useEditor, EditorContent } from "@tiptap/react";
 import { cn } from "@multica/ui/lib/utils";
 import type { UploadResult } from "@multica/core/hooks/use-file-upload";
+import { useWorkspaceSlug } from "@multica/core/paths";
 import { useQueryClient } from "@tanstack/react-query";
 import { createEditorExtensions } from "./extensions";
 import { uploadAndInsertFile } from "./extensions/file-upload";
@@ -74,6 +75,12 @@ interface ContentEditorProps {
   showBubbleMenu?: boolean;
   /** When true, bare Enter submits (chat-style). Mod-Enter always submits. */
   submitOnEnter?: boolean;
+  /**
+   * ID of the issue this editor belongs to. When set, the bubble menu exposes
+   * a "Create sub-issue from selection" action that parents the new issue
+   * under this ID and replaces the selection with a mention link.
+   */
+  currentIssueId?: string;
 }
 
 interface ContentEditorRef {
@@ -103,6 +110,7 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
       onUploadFile,
       showBubbleMenu = true,
       submitOnEnter = false,
+      currentIssueId,
     },
     ref,
   ) {
@@ -112,6 +120,14 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
     const onBlurRef = useRef(onBlur);
     const onUploadFileRef = useRef(onUploadFile);
     const prevContentRef = useRef(defaultValue);
+    const lastEmittedRef = useRef<string | null>(null);
+
+    // Current workspace slug kept in a ref so the click handler always sees the
+    // latest value without recreating the editor. Used by openLink to prefix
+    // legacy /issues/... style paths that lack a workspace slug.
+    const workspaceSlug = useWorkspaceSlug();
+    const workspaceSlugRef = useRef(workspaceSlug);
+    workspaceSlugRef.current = workspaceSlug;
 
     // Keep refs in sync without recreating editor
     onUpdateRef.current = onUpdate;
@@ -127,6 +143,9 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
       // Explicit for clarity — the real perf win is useEditorState in BubbleMenu.
       shouldRerenderOnTransaction: false,
       editable,
+      onCreate: ({ editor: ed }) => {
+        lastEmittedRef.current = stripBlobUrls(ed.getMarkdown());
+      },
       content: defaultValue ? preprocessMarkdown(defaultValue) : "",
       contentType: defaultValue ? "markdown" : undefined,
       extensions: createEditorExtensions({
@@ -141,7 +160,10 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
         if (!onUpdateRef.current) return;
         if (debounceRef.current) clearTimeout(debounceRef.current);
         debounceRef.current = setTimeout(() => {
-          onUpdateRef.current?.(stripBlobUrls(ed.getMarkdown()));
+          const md = stripBlobUrls(ed.getMarkdown());
+          if (md === lastEmittedRef.current) return;
+          lastEmittedRef.current = md;
+          onUpdateRef.current?.(md);
         }, debounceMs);
       },
       onBlur: () => {
@@ -159,7 +181,7 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
             if (!href || isMentionHref(href)) return false;
 
             event.preventDefault();
-            openLink(href);
+            openLink(href, workspaceSlugRef.current);
             return true;
           },
         },
@@ -243,7 +265,9 @@ const ContentEditor = forwardRef<ContentEditorRef, ContentEditorProps>(
         onMouseDown={handleContainerMouseDown}
       >
         <EditorContent className="flex-1 min-h-full" editor={editor} />
-        {editable && showBubbleMenu && <EditorBubbleMenu editor={editor} />}
+        {editable && showBubbleMenu && (
+          <EditorBubbleMenu editor={editor} currentIssueId={currentIssueId} />
+        )}
         <LinkHoverCard {...hover} />
       </div>
     );

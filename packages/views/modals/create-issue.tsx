@@ -1,51 +1,49 @@
 "use client";
 
 import { useState, useRef } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useNavigation } from "../navigation";
-import { Check, ChevronRight, Maximize2, Minimize2, X as XIcon } from "lucide-react";
+import {
+  ArrowDown,
+  ArrowUp,
+  Check,
+  ChevronRight,
+  Maximize2,
+  Minimize2,
+  MoreHorizontal,
+  X as XIcon,
+} from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
 import { toast } from "sonner";
-import type { IssueStatus, IssuePriority, IssueAssigneeType } from "@multica/core/types";
+import type { Issue, IssueStatus, IssuePriority, IssueAssigneeType } from "@multica/core/types";
 import {
   Dialog,
   DialogContent,
   DialogTitle,
 } from "@multica/ui/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@multica/ui/components/ui/dropdown-menu";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@multica/ui/components/ui/tooltip";
 import { Button } from "@multica/ui/components/ui/button";
 import { ContentEditor, type ContentEditorRef, TitleEditor, useFileDropZone, FileDropOverlay } from "../editor";
 import { StatusIcon, StatusPicker, PriorityPicker, AssigneePicker, DueDatePicker } from "../issues/components";
+import { BacklogAgentHintContent } from "../issues/components/backlog-agent-hint-dialog";
 import { ProjectPicker } from "../projects/components/project-picker";
-import { useWorkspaceStore } from "@multica/core/workspace";
+import { useCurrentWorkspace, useWorkspacePaths } from "@multica/core/paths";
+import { useWorkspaceId } from "@multica/core/hooks";
 import { useIssueDraftStore } from "@multica/core/issues/stores/draft-store";
-import { useCreateIssue } from "@multica/core/issues/mutations";
+import { issueDetailOptions } from "@multica/core/issues/queries";
+import { useCreateIssue, useUpdateIssue } from "@multica/core/issues/mutations";
 import { useFileUpload } from "@multica/core/hooks/use-file-upload";
 import { api } from "@multica/core/api";
 import { FileUploadButton } from "@multica/ui/components/common/file-upload-button";
-
-// ---------------------------------------------------------------------------
-// Pill trigger — shared rounded-full button style for toolbar
-// ---------------------------------------------------------------------------
-
-function PillButton({
-  children,
-  className,
-  ...props
-}: React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  return (
-    <button
-      type="button"
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs",
-        "hover:bg-accent/60 transition-colors cursor-pointer",
-        className,
-      )}
-      {...props}
-    >
-      {children}
-    </button>
-  );
-}
+import { PillButton } from "../common/pill-button";
+import { IssuePickerModal } from "./issue-picker-modal";
 
 // ---------------------------------------------------------------------------
 // CreateIssueModal
@@ -53,7 +51,8 @@ function PillButton({
 
 export function CreateIssueModal({ onClose, data }: { onClose: () => void; data?: Record<string, unknown> | null }) {
   const router = useNavigation();
-  const workspaceName = useWorkspaceStore((s) => s.workspace?.name);
+  const p = useWorkspacePaths();
+  const workspaceName = useCurrentWorkspace()?.name;
 
   const draft = useIssueDraftStore((s) => s.draft);
   const setDraft = useIssueDraftStore((s) => s.setDraft);
@@ -73,7 +72,24 @@ export function CreateIssueModal({ onClose, data }: { onClose: () => void; data?
   const [projectId, setProjectId] = useState<string | undefined>(
     (data?.project_id as string) || undefined,
   );
+  const [parentIssueId, setParentIssueId] = useState<string | undefined>(
+    (data?.parent_issue_id as string) || undefined,
+  );
+  const [parentPickerOpen, setParentPickerOpen] = useState(false);
+  // Children live as full Issue objects — the picker always returns the whole
+  // object, and we never need to hydrate from an ID the way we do for parent.
+  const [childIssues, setChildIssues] = useState<Issue[]>([]);
+  const [childPickerOpen, setChildPickerOpen] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
+  const [backlogHintIssueId, setBacklogHintIssueId] = useState<string | null>(null);
+
+  // Fetch parent issue details for the chip (status/identifier/title).
+  // List cache usually has it already, so this resolves synchronously.
+  const wsId = useWorkspaceId();
+  const { data: parentIssue } = useQuery({
+    ...issueDetailOptions(wsId, parentIssueId ?? ""),
+    enabled: !!parentIssueId,
+  });
 
   // File upload — collect attachment IDs so we can link them after issue creation.
   const [attachmentIds, setAttachmentIds] = useState<string[]>([]);
@@ -97,6 +113,7 @@ export function CreateIssueModal({ onClose, data }: { onClose: () => void; data?
   const updateDueDate = (v: string | null) => { setDueDate(v); setDraft({ dueDate: v }); };
 
   const createIssueMutation = useCreateIssue();
+  const updateIssueMutation = useUpdateIssue();
   const handleSubmit = async () => {
     if (!title.trim() || submitting) return;
     setSubmitting(true);
@@ -110,35 +127,69 @@ export function CreateIssueModal({ onClose, data }: { onClose: () => void; data?
         assignee_id: assigneeId,
         due_date: dueDate || undefined,
         attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
-        parent_issue_id: (data?.parent_issue_id as string) || undefined,
+        parent_issue_id: parentIssueId,
         project_id: projectId,
       });
+
+      // Link queued children to the new parent. Deferred to after create
+      // because the new issue's ID doesn't exist yet. Partial failures don't
+      // roll back the new issue — it's already committed.
+      if (childIssues.length > 0) {
+        const results = await Promise.allSettled(
+          childIssues.map((child) =>
+            updateIssueMutation.mutateAsync({
+              id: child.id,
+              parent_issue_id: issue.id,
+            }),
+          ),
+        );
+        const failed = results.filter((r) => r.status === "rejected").length;
+        if (failed > 0) {
+          toast.error(
+            failed === childIssues.length
+              ? "Failed to link sub-issues"
+              : `Failed to link ${failed} of ${childIssues.length} sub-issues`,
+          );
+        }
+      }
+
       clearDraft();
-      onClose();
-      toast.custom((t) => (
-        <div className="bg-popover text-popover-foreground border rounded-lg shadow-lg p-4 w-[360px]">
-          <div className="flex items-center gap-2 mb-2">
-            <div className="flex items-center justify-center size-5 rounded-full bg-emerald-500/15 text-emerald-500">
-              <Check className="size-3" />
+      const shouldShowBacklogHint =
+        status === "backlog" && assigneeType === "agent" && assigneeId &&
+        localStorage.getItem("multica:backlog-agent-hint-dismissed") !== "true";
+
+      if (shouldShowBacklogHint) {
+        setBacklogHintIssueId(issue.id);
+      } else {
+        onClose();
+      }
+
+      if (!shouldShowBacklogHint) {
+        toast.custom((t) => (
+          <div className="bg-popover text-popover-foreground border rounded-lg shadow-lg p-4 w-[360px]">
+            <div className="flex items-center gap-2 mb-2">
+              <div className="flex items-center justify-center size-5 rounded-full bg-emerald-500/15 text-emerald-500">
+                <Check className="size-3" />
+              </div>
+              <span className="text-sm font-medium">Issue created</span>
             </div>
-            <span className="text-sm font-medium">Issue created</span>
+            <div className="flex items-center gap-2 text-sm text-muted-foreground ml-7">
+              <StatusIcon status={issue.status} className="size-3.5 shrink-0" />
+              <span className="truncate">{issue.identifier} – {issue.title}</span>
+            </div>
+            <button
+              type="button"
+              className="ml-7 mt-2 text-sm text-primary hover:underline cursor-pointer"
+              onClick={() => {
+                router.push(p.issueDetail(issue.id));
+                toast.dismiss(t);
+              }}
+            >
+              View issue
+            </button>
           </div>
-          <div className="flex items-center gap-2 text-sm text-muted-foreground ml-7">
-            <StatusIcon status={issue.status} className="size-3.5 shrink-0" />
-            <span className="truncate">{issue.identifier} – {issue.title}</span>
-          </div>
-          <button
-            type="button"
-            className="ml-7 mt-2 text-sm text-primary hover:underline cursor-pointer"
-            onClick={() => {
-              router.push(`/issues/${issue.id}`);
-              toast.dismiss(t);
-            }}
-          >
-            View issue
-          </button>
-        </div>
-      ), { duration: 5000 });
+        ), { duration: 5000 });
+      }
     } catch {
       toast.error("Failed to create issue");
     } finally {
@@ -147,145 +198,293 @@ export function CreateIssueModal({ onClose, data }: { onClose: () => void; data?
   };
 
   return (
-    <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
+    <Dialog
+      open
+      onOpenChange={(v) => {
+        if (!v) {
+          setBacklogHintIssueId(null);
+          onClose();
+        }
+      }}
+    >
       <DialogContent
         finalFocus={false}
         showCloseButton={false}
         className={cn(
           "p-0 gap-0 flex flex-col overflow-hidden",
           "!top-1/2 !left-1/2 !-translate-x-1/2",
-          "!transition-all !duration-300 !ease-out",
-          isExpanded
+          backlogHintIssueId
+            ? "!max-w-[480px] !w-[calc(100vw-2rem)] !h-auto !-translate-y-1/2 !transition-none !duration-0"
+            : "!transition-all !duration-300 !ease-out",
+          !backlogHintIssueId && isExpanded
             ? "!max-w-4xl !w-full !h-5/6 !-translate-y-1/2"
-            : "!max-w-2xl !w-full !h-96 !-translate-y-1/2",
+            : !backlogHintIssueId
+              ? "!max-w-2xl !w-full !h-96 !-translate-y-1/2"
+              : "",
         )}
       >
-        <DialogTitle className="sr-only">New Issue</DialogTitle>
+        {backlogHintIssueId ? (
+          <BacklogAgentHintContent
+            onKeepInBacklog={() => {
+              setBacklogHintIssueId(null);
+              onClose();
+            }}
+            onDismissPermanently={() => {
+              localStorage.setItem("multica:backlog-agent-hint-dismissed", "true");
+            }}
+            onMoveToTodo={() => {
+              updateIssueMutation.mutate(
+                { id: backlogHintIssueId, status: "todo" },
+                { onError: () => toast.error("Failed to update status") },
+              );
+              setBacklogHintIssueId(null);
+              onClose();
+            }}
+          />
+        ) : (
+          <>
+            <DialogTitle className="sr-only">New Issue</DialogTitle>
 
-        {/* Header */}
-        <div className="flex items-center justify-between px-5 pt-3 pb-2 shrink-0">
-          <div className="flex items-center gap-1.5 text-xs">
-            <span className="text-muted-foreground">{workspaceName}</span>
-            <ChevronRight className="size-3 text-muted-foreground/50" />
-            {typeof data?.parent_issue_identifier === "string" && (
-              <>
-                <span className="text-muted-foreground">{data.parent_issue_identifier}</span>
+            {/* Header */}
+            <div className="flex items-center justify-between px-5 pt-3 pb-2 shrink-0">
+              <div className="flex items-center gap-1.5 text-xs">
+                <span className="text-muted-foreground">{workspaceName}</span>
                 <ChevronRight className="size-3 text-muted-foreground/50" />
-              </>
-            )}
-            <span className="font-medium">{data?.parent_issue_id ? "New sub-issue" : "New issue"}</span>
-          </div>
-          <div className="flex items-center gap-1">
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <button
-                    onClick={() => setIsExpanded(!isExpanded)}
-                    className="rounded-sm p-1.5 opacity-70 hover:opacity-100 hover:bg-accent/60 transition-all cursor-pointer"
-                  >
-                    {isExpanded ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
-                  </button>
-                }
+                <span className="font-medium">New issue</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        onClick={() => setIsExpanded(!isExpanded)}
+                        className="rounded-sm p-1.5 opacity-70 hover:opacity-100 hover:bg-accent/60 transition-all cursor-pointer"
+                      >
+                        {isExpanded ? <Minimize2 className="size-4" /> : <Maximize2 className="size-4" />}
+                      </button>
+                    }
+                  />
+                  <TooltipContent side="bottom">{isExpanded ? "Collapse" : "Expand"}</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <button
+                        onClick={onClose}
+                        className="rounded-sm p-1.5 opacity-70 hover:opacity-100 hover:bg-accent/60 transition-all cursor-pointer"
+                      >
+                        <XIcon className="size-4" />
+                      </button>
+                    }
+                  />
+                  <TooltipContent side="bottom">Close</TooltipContent>
+                </Tooltip>
+              </div>
+            </div>
+
+            {/* Title */}
+            <div className="px-5 pb-2 shrink-0">
+              <TitleEditor
+                autoFocus
+                defaultValue={draft.title}
+                placeholder="Issue title"
+                className="text-lg font-semibold"
+                onChange={(v) => updateTitle(v)}
+                onSubmit={handleSubmit}
               />
-              <TooltipContent side="bottom">{isExpanded ? "Collapse" : "Expand"}</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <button
-                    onClick={onClose}
-                    className="rounded-sm p-1.5 opacity-70 hover:opacity-100 hover:bg-accent/60 transition-all cursor-pointer"
-                  >
-                    <XIcon className="size-4" />
-                  </button>
-                }
+            </div>
+
+            {/* Description — takes remaining space */}
+            <div {...descDropZoneProps} className="relative flex-1 min-h-0 overflow-y-auto px-5">
+              <ContentEditor
+                ref={descEditorRef}
+                defaultValue={draft.description}
+                placeholder="Add description..."
+                onUpdate={(md) => setDraft({ description: md })}
+                onUploadFile={handleUpload}
+                debounceMs={500}
               />
-              <TooltipContent side="bottom">Close</TooltipContent>
-            </Tooltip>
-          </div>
-        </div>
+              {descDragOver && <FileDropOverlay />}
+            </div>
 
-        {/* Title */}
-        <div className="px-5 pb-2 shrink-0">
-          <TitleEditor
-            autoFocus
-            defaultValue={draft.title}
-            placeholder="Issue title"
-            className="text-lg font-semibold"
-            onChange={(v) => updateTitle(v)}
-            onSubmit={handleSubmit}
-          />
-        </div>
+            {/* Property toolbar */}
+            <div className="flex items-center gap-1.5 px-4 py-2 shrink-0 flex-wrap">
+              {/* Status */}
+              <StatusPicker
+                status={status}
+                onUpdate={(u) => { if (u.status) updateStatus(u.status); }}
+                triggerRender={<PillButton />}
+                align="start"
+              />
 
-        {/* Description — takes remaining space */}
-        <div {...descDropZoneProps} className="relative flex-1 min-h-0 overflow-y-auto px-5">
-          <ContentEditor
-            ref={descEditorRef}
-            defaultValue={draft.description}
-            placeholder="Add description..."
-            onUpdate={(md) => setDraft({ description: md })}
-            onUploadFile={handleUpload}
-            debounceMs={500}
-          />
-          {descDragOver && <FileDropOverlay />}
-        </div>
+              {/* Priority */}
+              <PriorityPicker
+                priority={priority}
+                onUpdate={(u) => { if (u.priority) updatePriority(u.priority); }}
+                triggerRender={<PillButton />}
+                align="start"
+              />
 
-        {/* Property toolbar */}
-        <div className="flex items-center gap-1.5 px-4 py-2 shrink-0 flex-wrap">
-          {/* Status */}
-          <StatusPicker
-            status={status}
-            onUpdate={(u) => { if (u.status) updateStatus(u.status); }}
-            triggerRender={<PillButton />}
-            align="start"
-          />
+              {/* Assignee */}
+              <AssigneePicker
+                assigneeType={assigneeType ?? null}
+                assigneeId={assigneeId ?? null}
+                onUpdate={(u) => updateAssignee(
+                  u.assignee_type ?? undefined,
+                  u.assignee_id ?? undefined,
+                )}
+                triggerRender={<PillButton />}
+                align="start"
+              />
 
-          {/* Priority */}
-          <PriorityPicker
-            priority={priority}
-            onUpdate={(u) => { if (u.priority) updatePriority(u.priority); }}
-            triggerRender={<PillButton />}
-            align="start"
-          />
+              {/* Due date */}
+              <DueDatePicker
+                dueDate={dueDate}
+                onUpdate={(u) => updateDueDate(u.due_date ?? null)}
+                triggerRender={<PillButton />}
+                align="start"
+              />
 
-          {/* Assignee */}
-          <AssigneePicker
-            assigneeType={assigneeType ?? null}
-            assigneeId={assigneeId ?? null}
-            onUpdate={(u) => updateAssignee(
-              u.assignee_type ?? undefined,
-              u.assignee_id ?? undefined,
-            )}
-            triggerRender={<PillButton />}
-            align="start"
-          />
+              {/* Project */}
+              <ProjectPicker
+                projectId={projectId ?? null}
+                onUpdate={(u) => setProjectId(u.project_id ?? undefined)}
+                triggerRender={<PillButton />}
+                align="start"
+              />
 
-          {/* Due date */}
-          <DueDatePicker
-            dueDate={dueDate}
-            onUpdate={(u) => updateDueDate(u.due_date ?? null)}
-            triggerRender={<PillButton />}
-            align="start"
-          />
+              {/* Parent chip — appears when parent is set.
+                  Placed before the ⋯ so it wraps to a new line with ⋯ if
+                  space is tight, but ⋯ always stays last in DOM order. */}
+              {parentIssueId && parentIssue && (
+                <div className="inline-flex items-center rounded-full border text-xs transition-colors hover:bg-accent/60">
+                  <button
+                    type="button"
+                    onClick={() => setParentPickerOpen(true)}
+                    className="flex items-center gap-1.5 py-1 pl-2.5 cursor-pointer"
+                  >
+                    <ArrowUp className="size-3 text-muted-foreground" />
+                    <span>Sub-issue of {parentIssue.identifier}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setParentIssueId(undefined)}
+                    className="p-1 pr-2 text-muted-foreground hover:text-foreground cursor-pointer"
+                    aria-label="Remove parent"
+                  >
+                    <XIcon className="size-3" />
+                  </button>
+                </div>
+              )}
 
-          {/* Project */}
-          <ProjectPicker
-            projectId={projectId ?? null}
-            onUpdate={(u) => setProjectId(u.project_id ?? undefined)}
-            triggerRender={<PillButton />}
-            align="start"
-          />
-        </div>
+              {/* Child chips — one per queued sub-issue. Links are deferred
+                  until create resolves (see handleSubmit). */}
+              {childIssues.map((c) => (
+                <div
+                  key={c.id}
+                  className="inline-flex items-center rounded-full border text-xs transition-colors hover:bg-accent/60"
+                >
+                  <div className="flex items-center gap-1.5 py-1 pl-2.5">
+                    <ArrowDown className="size-3 text-muted-foreground" />
+                    <span>Sub-issue: {c.identifier}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setChildIssues((prev) => prev.filter((x) => x.id !== c.id))
+                    }
+                    className="p-1 pr-2 text-muted-foreground hover:text-foreground cursor-pointer"
+                    aria-label={`Remove sub-issue ${c.identifier}`}
+                  >
+                    <XIcon className="size-3" />
+                  </button>
+                </div>
+              ))}
 
-        {/* Footer */}
-        <div className="flex items-center justify-between px-4 py-3 border-t shrink-0">
-          <FileUploadButton
-            onSelect={(file) => descEditorRef.current?.uploadFile(file)}
-          />
-          <Button size="sm" onClick={handleSubmit} disabled={!title.trim() || submitting}>
-            {submitting ? "Creating..." : "Create Issue"}
-          </Button>
-        </div>
+              {/* Overflow — always the last child so DOM order keeps it at the
+                  end of the wrap flow, no matter how many chips are present. */}
+              <DropdownMenu>
+                <DropdownMenuTrigger
+                  render={
+                    <PillButton aria-label="More options">
+                      <MoreHorizontal className="size-3.5" />
+                    </PillButton>
+                  }
+                />
+                <DropdownMenuContent align="start" className="w-auto">
+                  {parentIssueId && parentIssue ? (
+                    <DropdownMenuItem onClick={() => setParentPickerOpen(true)}>
+                      <ArrowUp className="h-3.5 w-3.5" />
+                      Parent: {parentIssue.identifier}
+                    </DropdownMenuItem>
+                  ) : (
+                    <DropdownMenuItem onClick={() => setParentPickerOpen(true)}>
+                      <ArrowUp className="h-3.5 w-3.5" />
+                      Set parent issue...
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem onClick={() => setChildPickerOpen(true)}>
+                    <ArrowDown className="h-3.5 w-3.5" />
+                    Add sub-issue...
+                  </DropdownMenuItem>
+                  {parentIssueId && parentIssue && (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        variant="destructive"
+                        onClick={() => setParentIssueId(undefined)}
+                      >
+                        <XIcon className="h-3.5 w-3.5" />
+                        Remove parent
+                      </DropdownMenuItem>
+                    </>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+
+            {/* Parent / child pickers — rendered inline so they stack over this
+                modal instead of replacing it via useModalStore. */}
+            <IssuePickerModal
+              open={parentPickerOpen}
+              onOpenChange={setParentPickerOpen}
+              title="Set parent issue"
+              description="Search for an issue to set as the parent of the new issue"
+              excludeIds={[
+                ...childIssues.map((c) => c.id),
+                ...(parentIssueId ? [parentIssueId] : []),
+              ]}
+              onSelect={(selected) => {
+                setParentIssueId(selected.id);
+              }}
+            />
+            <IssuePickerModal
+              open={childPickerOpen}
+              onOpenChange={setChildPickerOpen}
+              title="Add sub-issue"
+              description="Search for an issue to add as a sub-issue of the new issue"
+              excludeIds={[
+                ...childIssues.map((c) => c.id),
+                ...(parentIssueId ? [parentIssueId] : []),
+              ]}
+              onSelect={(selected) => {
+                setChildIssues((prev) =>
+                  prev.some((x) => x.id === selected.id) ? prev : [...prev, selected],
+                );
+              }}
+            />
+
+            {/* Footer */}
+            <div className="flex items-center justify-between px-4 py-3 border-t shrink-0">
+              <FileUploadButton
+                onSelect={(file) => descEditorRef.current?.uploadFile(file)}
+              />
+              <Button size="sm" onClick={handleSubmit} disabled={!title.trim() || submitting}>
+                {submitting ? "Creating..." : "Create Issue"}
+              </Button>
+            </div>
+          </>
+        )}
       </DialogContent>
     </Dialog>
   );

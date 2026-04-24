@@ -9,6 +9,7 @@ import {
   Save,
   AlertCircle,
   Download,
+  HardDrive,
 } from "lucide-react";
 import type { Skill, CreateSkillRequest, UpdateSkillRequest } from "@multica/core/types";
 import {
@@ -34,12 +35,13 @@ import { toast } from "sonner";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { api } from "@multica/core/api";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useAuthStore } from "@multica/core/auth";
 import { useWorkspaceId } from "@multica/core/hooks";
 import { skillListOptions, workspaceKeys } from "@multica/core/workspace/queries";
 
+import { PageHeader } from "../../layout/page-header";
 import { FileTree } from "./file-tree";
 import { FileViewer } from "./file-viewer";
+import { RuntimeLocalSkillImportPanel } from "./runtime-local-skill-import-panel";
 
 // ---------------------------------------------------------------------------
 // Create Skill Dialog
@@ -49,12 +51,14 @@ function CreateSkillDialog({
   onClose,
   onCreate,
   onImport,
+  onRuntimeImported,
 }: {
   onClose: () => void;
   onCreate: (data: CreateSkillRequest) => Promise<void>;
   onImport: (url: string) => Promise<void>;
+  onRuntimeImported?: (skill: Skill) => void;
 }) {
-  const [tab, setTab] = useState<"create" | "import">("create");
+  const [tab, setTab] = useState<"create" | "import" | "runtime">("create");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [importUrl, setImportUrl] = useState("");
@@ -94,15 +98,21 @@ function CreateSkillDialog({
 
   return (
     <Dialog open onOpenChange={(v) => { if (!v) onClose(); }}>
-      <DialogContent className="sm:max-w-md">
+      <DialogContent
+        className={`flex max-h-[85vh] flex-col ${tab === "runtime" ? "sm:max-w-2xl" : "sm:max-w-md"}`}
+      >
         <DialogHeader>
           <DialogTitle>Add Workspace Skill</DialogTitle>
           <DialogDescription>
-            Create a new skill or import from ClawHub / Skills.sh. Workspace skills are shared with your team and automatically injected into agent runs.
+            Create a new skill, import from ClawHub / Skills.sh, or pull one in from a connected runtime. Workspace skills are shared with your team and automatically injected into agent runs.
           </DialogDescription>
         </DialogHeader>
 
-        <Tabs value={tab} onValueChange={(v) => setTab(v as "create" | "import")}>
+        <Tabs
+          value={tab}
+          onValueChange={(v) => setTab(v as "create" | "import" | "runtime")}
+          className="flex min-h-0 flex-1 flex-col"
+        >
           <TabsList className="w-full">
             <TabsTrigger value="create" className="flex-1">
               <Plus className="mr-1.5 h-3 w-3" />
@@ -110,11 +120,17 @@ function CreateSkillDialog({
             </TabsTrigger>
             <TabsTrigger value="import" className="flex-1">
               <Download className="mr-1.5 h-3 w-3" />
-              Import
+              Import URL
+            </TabsTrigger>
+            <TabsTrigger value="runtime" className="flex-1">
+              <HardDrive className="mr-1.5 h-3 w-3" />
+              From Runtime
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="create" className="space-y-4 mt-4 min-h-[180px]">
+          <div className="-mx-6 mt-4 flex-1 overflow-y-auto px-6">
+
+          <TabsContent value="create" className="space-y-4 min-h-[180px]">
             <div>
               <Label className="text-xs text-muted-foreground">Name</Label>
               <Input
@@ -139,7 +155,7 @@ function CreateSkillDialog({
             </div>
           </TabsContent>
 
-          <TabsContent value="import" className="space-y-4 mt-4 min-h-[180px]">
+          <TabsContent value="import" className="space-y-4 min-h-[180px]">
             <div>
               <Label className="text-xs text-muted-foreground">Skill URL</Label>
               <Input
@@ -187,15 +203,27 @@ function CreateSkillDialog({
               </div>
             )}
           </TabsContent>
+
+          <TabsContent value="runtime" className="min-h-[180px]">
+            <RuntimeLocalSkillImportPanel
+              active={tab === "runtime"}
+              onImported={(skill) => {
+                onRuntimeImported?.(skill);
+                onClose();
+              }}
+            />
+          </TabsContent>
+          </div>
         </Tabs>
 
         <DialogFooter>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          {tab === "create" ? (
+          {tab === "create" && (
             <Button onClick={handleCreate} disabled={loading || !name.trim()}>
               {loading ? "Creating..." : "Create"}
             </Button>
-          ) : (
+          )}
+          {tab === "import" && (
             <Button onClick={handleImport} disabled={loading || !importUrl.trim()}>
               {loading ? (
                 detectedSource === "clawhub"
@@ -211,6 +239,9 @@ function CreateSkillDialog({
               )}
             </Button>
           )}
+          {/* The runtime tab embeds its own "Import to Workspace" button
+              inside the panel since it can only enable once a runtime +
+              skill are picked. */}
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -437,9 +468,6 @@ function SkillDetail({
       {/* Header */}
       <div className="flex items-center justify-between border-b px-4 py-3">
         <div className="flex items-center gap-3 min-w-0 flex-1">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted">
-            <Sparkles className="h-4 w-4 text-muted-foreground" />
-          </div>
           <div className="grid grid-cols-2 gap-3 flex-1 min-w-0">
             <Input
               type="text"
@@ -496,7 +524,7 @@ function SkillDetail({
                   render={
                     <Button
                       variant="ghost"
-                      size="icon-xs"
+                      size="icon-sm"
                       onClick={() => setShowAddFile(true)}
                       className="text-muted-foreground"
                     >
@@ -512,7 +540,7 @@ function SkillDetail({
                     render={
                       <Button
                         variant="ghost"
-                        size="icon-xs"
+                        size="icon-sm"
                         onClick={handleDeleteFile}
                         className="text-muted-foreground hover:text-destructive"
                       >
@@ -613,10 +641,9 @@ function SkillDetail({
 // ---------------------------------------------------------------------------
 
 export default function SkillsPage() {
-  const isLoading = useAuthStore((s) => s.isLoading);
   const qc = useQueryClient();
   const wsId = useWorkspaceId();
-  const { data: skills = [] } = useQuery(skillListOptions(wsId));
+  const { data: skills = [], isLoading } = useQuery(skillListOptions(wsId));
   const [selectedId, setSelectedId] = useState<string>("");
   const [showCreate, setShowCreate] = useState(false);
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
@@ -699,7 +726,7 @@ export default function SkillsPage() {
             <Skeleton className="h-8 w-56" />
           </div>
           <div className="flex flex-1 min-h-0">
-            <div className="w-48 border-r p-3 space-y-2">
+            <div className="w-52 border-r p-3 space-y-2">
               <Skeleton className="h-4 w-full" />
               <Skeleton className="h-4 w-3/4" />
             </div>
@@ -724,23 +751,23 @@ export default function SkillsPage() {
       <ResizablePanel id="list" defaultSize={280} minSize={240} maxSize={400} groupResizeBehavior="preserve-pixel-size">
         {/* Left column — skill list */}
         <div className="overflow-y-auto h-full border-r">
-          <div className="flex h-12 items-center justify-between border-b px-4">
+          <PageHeader className="justify-between">
             <h1 className="text-sm font-semibold">Skills</h1>
             <Tooltip>
               <TooltipTrigger
                 render={
                   <Button
                     variant="ghost"
-                    size="icon-xs"
+                    size="icon-sm"
                     onClick={() => setShowCreate(true)}
                   >
                     <Plus className="h-4 w-4 text-muted-foreground" />
                   </Button>
                 }
               />
-              <TooltipContent side="bottom">Create skill</TooltipContent>
+              <TooltipContent side="bottom">Add skill</TooltipContent>
             </Tooltip>
-          </div>
+          </PageHeader>
           {skills.length === 0 ? (
             <div className="flex flex-col items-center justify-center px-4 py-12">
               <Sparkles className="h-8 w-8 text-muted-foreground/40" />
@@ -754,7 +781,7 @@ export default function SkillsPage() {
                 className="mt-3"
               >
                 <Plus className="h-3 w-3" />
-                Create Skill
+                Add Skill
               </Button>
             </div>
           ) : (
@@ -797,7 +824,7 @@ export default function SkillsPage() {
                 className="mt-3"
               >
                 <Plus className="h-3 w-3" />
-                Create Skill
+                Add Skill
               </Button>
             </div>
           )}
@@ -809,6 +836,7 @@ export default function SkillsPage() {
           onClose={() => setShowCreate(false)}
           onCreate={handleCreate}
           onImport={handleImport}
+          onRuntimeImported={(skill) => setSelectedId(skill.id)}
         />
       )}
     </ResizablePanelGroup>

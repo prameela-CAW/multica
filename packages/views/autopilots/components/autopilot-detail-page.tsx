@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import { Zap, Play, Pause, Clock, Plus, Trash2, CheckCircle2, XCircle, SkipForward, Loader2, Pencil } from "lucide-react";
+import { useState } from "react";
+import { Zap, Play, Clock, Plus, Trash2, CheckCircle2, XCircle, Loader2, Pencil } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { autopilotDetailOptions, autopilotRunsOptions } from "@multica/core/autopilots/queries";
 import {
@@ -11,13 +11,15 @@ import {
   useCreateAutopilotTrigger,
   useDeleteAutopilotTrigger,
 } from "@multica/core/autopilots/mutations";
-import { agentListOptions } from "@multica/core/workspace/queries";
 import { useWorkspaceId } from "@multica/core/hooks";
+import { useWorkspacePaths } from "@multica/core/paths";
 import { useActorName } from "@multica/core/workspace/hooks";
 import { useNavigation, AppLink } from "../../navigation";
+import { PageHeader } from "../../layout/page-header";
 import { ActorAvatar } from "../../common/actor-avatar";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
 import { Button } from "@multica/ui/components/ui/button";
+import { Switch } from "@multica/ui/components/ui/switch";
 import { cn } from "@multica/ui/lib/utils";
 import { toast } from "sonner";
 import {
@@ -26,19 +28,14 @@ import {
   DialogTitle,
 } from "@multica/ui/components/ui/dialog";
 import {
-  Select,
-  SelectTrigger,
-  SelectValue,
-  SelectContent,
-  SelectItem,
-} from "@multica/ui/components/ui/select";
-import {
   TriggerConfigSection,
   getDefaultTriggerConfig,
   toCronExpression,
 } from "./trigger-config";
 import type { TriggerConfig } from "./trigger-config";
-import type { AutopilotRun, AutopilotTrigger } from "@multica/core/types";
+import type { AutopilotExecutionMode, AutopilotRun, AutopilotTrigger } from "@multica/core/types";
+import { ReadonlyContent } from "../../editor";
+import { AutopilotDialog } from "./autopilot-dialog";
 
 function formatDate(date: string): string {
   return new Date(date).toLocaleString(undefined, {
@@ -49,29 +46,26 @@ function formatDate(date: string): string {
   });
 }
 
-const RUN_STATUS_CONFIG: Record<string, { label: string; color: string; icon: typeof CheckCircle2 }> = {
-  pending: { label: "Pending", color: "text-blue-500", icon: Clock },
+const RUN_STATUS_CONFIG: Record<string, { label: string; color: string; icon: typeof CheckCircle2; spin?: boolean }> = {
   issue_created: { label: "Issue Created", color: "text-blue-500", icon: Clock },
-  running: { label: "Running", color: "text-blue-500", icon: Loader2 },
+  running: { label: "Running", color: "text-blue-500", icon: Loader2, spin: true },
   completed: { label: "Completed", color: "text-emerald-500", icon: CheckCircle2 },
   failed: { label: "Failed", color: "text-destructive", icon: XCircle },
-  skipped: { label: "Skipped", color: "text-muted-foreground", icon: SkipForward },
 };
 
 function RunRow({ run }: { run: AutopilotRun }) {
-  const cfg = (RUN_STATUS_CONFIG[run.status] ?? RUN_STATUS_CONFIG["pending"])!;
+  const wsPaths = useWorkspacePaths();
+  const cfg = (RUN_STATUS_CONFIG[run.status] ?? RUN_STATUS_CONFIG["issue_created"])!;
   const StatusIcon = cfg.icon;
 
-  return (
-    <div className="flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-accent/30 transition-colors">
-      <StatusIcon className={cn("h-4 w-4 shrink-0", cfg.color)} />
+  const content = (
+    <>
+      <StatusIcon className={cn("h-4 w-4 shrink-0", cfg.color, cfg.spin && "animate-spin")} />
       <span className={cn("w-24 shrink-0 text-xs font-medium", cfg.color)}>{cfg.label}</span>
       <span className="w-16 shrink-0 text-xs text-muted-foreground capitalize">{run.source}</span>
       <span className="flex-1 min-w-0 text-xs text-muted-foreground truncate">
         {run.issue_id ? (
-          <AppLink href={`/issues/${run.issue_id}`} className="hover:underline">
-            Issue linked
-          </AppLink>
+          "Issue linked"
         ) : run.failure_reason ? (
           <span className="text-destructive">{run.failure_reason}</span>
         ) : null}
@@ -79,8 +73,20 @@ function RunRow({ run }: { run: AutopilotRun }) {
       <span className="w-32 shrink-0 text-right text-xs text-muted-foreground tabular-nums">
         {formatDate(run.triggered_at || run.created_at)}
       </span>
-    </div>
+    </>
   );
+
+  const rowClass = "flex items-center gap-3 px-4 py-2.5 text-sm hover:bg-accent/30 transition-colors";
+
+  if (run.issue_id) {
+    return (
+      <AppLink href={wsPaths.issueDetail(run.issue_id)} className={cn(rowClass, "cursor-pointer")}>
+        {content}
+      </AppLink>
+    );
+  }
+
+  return <div className={rowClass}>{content}</div>;
 }
 
 function TriggerRow({ trigger, autopilotId }: { trigger: AutopilotTrigger; autopilotId: string }) {
@@ -123,170 +129,6 @@ function TriggerRow({ trigger, autopilotId }: { trigger: AutopilotTrigger; autop
         <Trash2 className="h-3.5 w-3.5 text-muted-foreground" />
       </Button>
     </div>
-  );
-}
-
-const PRIORITY_OPTIONS = [
-  { value: "urgent", label: "Urgent" },
-  { value: "high", label: "High" },
-  { value: "medium", label: "Medium" },
-  { value: "low", label: "Low" },
-  { value: "none", label: "None" },
-];
-
-const EXECUTION_MODE_OPTIONS = [
-  { value: "create_issue", label: "Create Issue" },
-  { value: "run_only", label: "Run Only" },
-];
-
-function EditAutopilotDialog({
-  open,
-  onOpenChange,
-  autopilot,
-  agents,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  autopilot: { id: string; title: string; description?: string | null; assignee_id: string; priority: string; execution_mode: string; issue_title_template?: string | null };
-  agents: { id: string; name: string; archived_at?: string | null }[];
-}) {
-  const updateAutopilot = useUpdateAutopilot();
-  const [title, setTitle] = useState(autopilot.title);
-  const [description, setDescription] = useState(autopilot.description ?? "");
-  const [assigneeId, setAssigneeId] = useState(autopilot.assignee_id);
-  const [priority, setPriority] = useState(autopilot.priority);
-  const [executionMode, setExecutionMode] = useState(autopilot.execution_mode);
-  const [submitting, setSubmitting] = useState(false);
-
-  const activeAgents = agents.filter((a) => !a.archived_at);
-
-  // Sync form when autopilot data changes (e.g. after optimistic update)
-  useEffect(() => {
-    setTitle(autopilot.title);
-    setDescription(autopilot.description ?? "");
-    setAssigneeId(autopilot.assignee_id);
-    setPriority(autopilot.priority);
-    setExecutionMode(autopilot.execution_mode);
-  }, [autopilot]);
-
-  const handleSubmit = async () => {
-    if (!title.trim() || !assigneeId || submitting) return;
-    setSubmitting(true);
-    try {
-      await updateAutopilot.mutateAsync({
-        id: autopilot.id,
-        title: title.trim(),
-        description: description.trim() || null,
-        assignee_id: assigneeId,
-        priority,
-        execution_mode: executionMode as "create_issue" | "run_only",
-      });
-      onOpenChange(false);
-      toast.success("Autopilot updated");
-    } catch {
-      toast.error("Failed to update autopilot");
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-lg">
-        <DialogTitle>Edit Autopilot</DialogTitle>
-        <div className="space-y-4 pt-2">
-          {/* Name */}
-          <div>
-            <label className="text-xs font-medium text-muted-foreground">Name</label>
-            <input
-              type="text"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="e.g. Daily code review"
-              className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring"
-              autoFocus
-            />
-          </div>
-
-          {/* Prompt */}
-          <div>
-            <label className="text-xs font-medium text-muted-foreground">Prompt</label>
-            <textarea
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Step-by-step instructions for the agent..."
-              rows={6}
-              className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring resize-y"
-            />
-          </div>
-
-          {/* Agent + Priority */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs font-medium text-muted-foreground">Agent</label>
-              <Select value={assigneeId} onValueChange={(v) => v && setAssigneeId(v)}>
-                <SelectTrigger className="mt-1 w-full">
-                  <SelectValue>
-                    {(value: string | null) => {
-                      if (!value) return "Select agent...";
-                      const agent = activeAgents.find((a) => a.id === value);
-                      return agent?.name ?? "Unknown Agent";
-                    }}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {activeAgents.map((a) => (
-                    <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <label className="text-xs font-medium text-muted-foreground">Priority</label>
-              <Select value={priority} onValueChange={(v) => v && setPriority(v)}>
-                <SelectTrigger className="mt-1 w-full">
-                  <SelectValue>
-                    {(value: string | null) => PRIORITY_OPTIONS.find((o) => o.value === value)?.label ?? "Medium"}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {PRIORITY_OPTIONS.map((o) => (
-                    <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-
-          {/* Execution Mode */}
-          <div>
-            <label className="text-xs font-medium text-muted-foreground">Execution Mode</label>
-            <Select value={executionMode} onValueChange={(v) => v && setExecutionMode(v)}>
-              <SelectTrigger className="mt-1 w-full">
-                <SelectValue>
-                  {(value: string | null) => EXECUTION_MODE_OPTIONS.find((o) => o.value === value)?.label ?? "Create Issue"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectContent>
-                {EXECUTION_MODE_OPTIONS.map((o) => (
-                  <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          {/* Actions */}
-          <div className="flex justify-end gap-2 pt-1">
-            <Button size="sm" variant="outline" onClick={() => onOpenChange(false)}>
-              Cancel
-            </Button>
-            <Button size="sm" onClick={handleSubmit} disabled={!title.trim() || !assigneeId || submitting}>
-              {submitting ? "Saving..." : "Save"}
-            </Button>
-          </div>
-        </div>
-      </DialogContent>
-    </Dialog>
   );
 }
 
@@ -357,12 +199,12 @@ function AddTriggerDialog({
 
 export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
   const wsId = useWorkspaceId();
+  const wsPaths = useWorkspacePaths();
   const router = useNavigation();
   const { getActorName } = useActorName();
 
   const { data, isLoading } = useQuery(autopilotDetailOptions(wsId, autopilotId));
   const { data: runs = [], isLoading: runsLoading } = useQuery(autopilotRunsOptions(wsId, autopilotId));
-  const { data: agents = [] } = useQuery(agentListOptions(wsId));
   const updateAutopilot = useUpdateAutopilot();
   const deleteAutopilot = useDeleteAutopilot();
   const triggerAutopilot = useTriggerAutopilot();
@@ -372,9 +214,39 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
 
   if (isLoading) {
     return (
-      <div className="p-6 space-y-4">
-        <Skeleton className="h-8 w-64" />
-        <Skeleton className="h-40 w-full" />
+      <div className="flex h-full flex-col">
+        <div className="flex h-12 shrink-0 items-center gap-2 border-b px-5">
+          <Skeleton className="h-4 w-4" />
+          <span className="text-muted-foreground">/</span>
+          <Skeleton className="h-4 w-32" />
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          <div className="max-w-4xl mx-auto p-6 space-y-8">
+            <section className="space-y-4">
+              <Skeleton className="h-3 w-20" />
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-1">
+                  <Skeleton className="h-3 w-12" />
+                  <Skeleton className="h-5 w-32" />
+                </div>
+                <div className="space-y-1">
+                  <Skeleton className="h-3 w-12" />
+                  <Skeleton className="h-5 w-24" />
+                </div>
+              </div>
+            </section>
+            <section className="space-y-3">
+              <Skeleton className="h-4 w-16" />
+              <Skeleton className="h-10 w-full rounded-md" />
+            </section>
+            <section className="space-y-3">
+              <Skeleton className="h-4 w-24" />
+              {Array.from({ length: 3 }).map((_, i) => (
+                <Skeleton key={i} className="h-10 w-full" />
+              ))}
+            </section>
+          </div>
+        </div>
       </div>
     );
   }
@@ -402,54 +274,55 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
     try {
       await deleteAutopilot.mutateAsync(autopilotId);
       toast.success("Autopilot deleted");
-      router.push("/autopilots");
+      router.push(wsPaths.autopilots());
     } catch {
       toast.error("Failed to delete autopilot");
     }
   };
 
-  const handleToggleStatus = () => {
-    const newStatus = autopilot.status === "active" ? "paused" : "active";
-    updateAutopilot.mutate({ id: autopilotId, status: newStatus });
+  const handleToggleStatus = (checked: boolean) => {
+    updateAutopilot.mutate({ id: autopilotId, status: checked ? "active" : "paused" });
   };
 
   return (
     <div className="flex h-full flex-col">
       {/* Header */}
-      <div className="flex h-12 shrink-0 items-center justify-between border-b px-5">
+      <PageHeader className="justify-between px-5">
         <div className="flex items-center gap-2">
-          <AppLink href="/autopilots" className="text-muted-foreground hover:text-foreground transition-colors">
+          <AppLink href={wsPaths.autopilots()} className="text-muted-foreground hover:text-foreground transition-colors">
             <Zap className="h-4 w-4" />
           </AppLink>
           <span className="text-muted-foreground">/</span>
           <h1 className="text-sm font-medium truncate">{autopilot.title}</h1>
-          <span className={cn(
-            "ml-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs font-medium",
-            autopilot.status === "active" ? "bg-emerald-500/10 text-emerald-500" :
-            autopilot.status === "paused" ? "bg-amber-500/10 text-amber-500" :
-            "bg-muted text-muted-foreground",
-          )}>
-            {autopilot.status}
-          </span>
+          <div className="ml-1 flex items-center gap-1.5">
+            <Switch
+              size="sm"
+              checked={autopilot.status === "active"}
+              onCheckedChange={handleToggleStatus}
+              disabled={autopilot.status === "archived"}
+              aria-label={autopilot.status === "active" ? "Pause autopilot" : "Activate autopilot"}
+            />
+            <span className={cn(
+              "text-xs font-medium capitalize",
+              autopilot.status === "active" ? "text-emerald-500" :
+              autopilot.status === "paused" ? "text-amber-500" :
+              "text-muted-foreground",
+            )}>
+              {autopilot.status}
+            </span>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" onClick={() => setEditDialogOpen(true)}>
             <Pencil className="h-3.5 w-3.5 mr-1" />
             Edit
           </Button>
-          <Button size="sm" variant="outline" onClick={handleToggleStatus}>
-            {autopilot.status === "active" ? (
-              <><Pause className="h-3.5 w-3.5 mr-1" /> Pause</>
-            ) : (
-              <><Play className="h-3.5 w-3.5 mr-1" /> Activate</>
-            )}
-          </Button>
           <Button size="sm" onClick={handleRunNow} disabled={autopilot.status !== "active" || triggerAutopilot.isPending}>
             <Play className="h-3.5 w-3.5 mr-1" />
             {triggerAutopilot.isPending ? "Running..." : "Run now"}
           </Button>
         </div>
-      </div>
+      </PageHeader>
 
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-4xl mx-auto p-6 space-y-8">
@@ -465,23 +338,17 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
                 </div>
               </div>
               <div>
-                <label className="text-xs text-muted-foreground">Priority</label>
-                <div className="mt-1 capitalize">{autopilot.priority}</div>
-              </div>
-              <div>
-                <label className="text-xs text-muted-foreground">Execution Mode</label>
+                <label className="text-xs text-muted-foreground">Output Mode</label>
                 <div className="mt-1">
                   {autopilot.execution_mode === "create_issue" ? "Create Issue" : "Run Only"}
                 </div>
               </div>
-              <div>
-                <label className="text-xs text-muted-foreground">Concurrency</label>
-                <div className="mt-1 capitalize">{autopilot.concurrency_policy}</div>
-              </div>
               {autopilot.description && (
                 <div className="col-span-2">
                   <label className="text-xs text-muted-foreground">Prompt</label>
-                  <div className="mt-1 whitespace-pre-wrap text-sm">{autopilot.description}</div>
+                  <div className="mt-1">
+                    <ReadonlyContent content={autopilot.description} />
+                  </div>
                 </div>
               )}
             </div>
@@ -547,12 +414,21 @@ export function AutopilotDetailPage({ autopilotId }: { autopilotId: string }) {
         onOpenChange={setTriggerDialogOpen}
         autopilotId={autopilotId}
       />
-      <EditAutopilotDialog
-        open={editDialogOpen}
-        onOpenChange={setEditDialogOpen}
-        autopilot={autopilot}
-        agents={agents}
-      />
+      {editDialogOpen && (
+        <AutopilotDialog
+          mode="edit"
+          open={editDialogOpen}
+          onOpenChange={setEditDialogOpen}
+          autopilotId={autopilot.id}
+          initial={{
+            title: autopilot.title,
+            description: autopilot.description ?? "",
+            assignee_id: autopilot.assignee_id,
+            execution_mode: autopilot.execution_mode as AutopilotExecutionMode,
+          }}
+          triggers={triggers}
+        />
+      )}
     </div>
   );
 }

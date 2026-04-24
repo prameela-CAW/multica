@@ -33,8 +33,11 @@ import type {
   RuntimeUsage,
   IssueUsageSummary,
   RuntimeHourlyActivity,
-  RuntimePing,
   RuntimeUpdate,
+  RuntimeModelListRequest,
+  RuntimeLocalSkillListRequest,
+  CreateRuntimeLocalSkillImportRequest,
+  RuntimeLocalSkillImportRequest,
   TimelineEntry,
   AssigneeFrequencyEntry,
   TaskMessagePayload,
@@ -64,17 +67,80 @@ import type {
   GetAutopilotResponse,
   ListAutopilotRunsResponse,
 } from "../types";
+import type { OnboardingCompletionPath } from "../onboarding/types";
 import { type Logger, noopLogger } from "../logger";
 import { createRequestId } from "../utils";
+import { getCurrentSlug } from "../platform/workspace-storage";
+
+/** Identifies the calling client to the server.
+ *  Sent on every HTTP request as X-Client-Platform / X-Client-Version /
+ *  X-Client-OS so the backend can log, gate, or split metrics by client.
+ *  See server/internal/middleware/client.go for the receiving end. */
+export interface ApiClientIdentity {
+  /** Logical client kind. Server expects: "web" | "desktop" | "cli" | "daemon". */
+  platform?: string;
+  /** Client/app version string (e.g. "0.1.0", git tag, commit). */
+  version?: string;
+  /** Operating system the client is running on: "macos" | "windows" | "linux". */
+  os?: string;
+}
 
 export interface ApiClientOptions {
   logger?: Logger;
   onUnauthorized?: () => void;
+  /** Identifies the client to the server. Sent as X-Client-* headers. */
+  identity?: ApiClientIdentity;
 }
 
 export interface LoginResponse {
   token: string;
   user: User;
+}
+
+// --- Starter content (post-onboarding import) -----------------------------
+// Shape mirrors the Go request/response in handler/onboarding.go.
+//
+// The client sends both branches of sub-issues and an unbound welcome
+// issue template (title + description, no `agent_id`). The SERVER picks
+// the branch by inspecting the workspace's agent list inside the
+// import transaction. This removes the client as a trusted decider —
+// even if the client has a stale agent cache or lies, the server uses
+// the DB as source of truth.
+
+export interface ImportStarterIssuePayload {
+  title: string;
+  description: string;
+  status: string;
+  priority: string;
+  /** Server uses `user_id` (per app-wide AssigneePicker convention)
+   *  as assignee when true. No member_id is threaded through. */
+  assign_to_self: boolean;
+}
+
+export interface ImportStarterWelcomeIssueTemplate {
+  title: string;
+  description: string;
+  /** Defaults to "high" on server when empty. */
+  priority: string;
+}
+
+export interface ImportStarterContentPayload {
+  workspace_id: string;
+  project: { title: string; description: string; icon: string };
+  /** Always sent. Server creates it only when an agent exists in the
+   *  workspace; ignored otherwise. Agent id is picked by the server. */
+  welcome_issue_template: ImportStarterWelcomeIssueTemplate;
+  /** Used when the workspace has at least one agent. */
+  agent_guided_sub_issues: ImportStarterIssuePayload[];
+  /** Used when the workspace has zero agents. */
+  self_serve_sub_issues: ImportStarterIssuePayload[];
+}
+
+export interface ImportStarterContentResponse {
+  user: User;
+  project_id: string;
+  /** Non-null when server took the agent-guided branch. */
+  welcome_issue_id: string | null;
 }
 
 export class ApiError extends Error {
@@ -92,7 +158,6 @@ export class ApiError extends Error {
 export class ApiClient {
   private baseUrl: string;
   private token: string | null = null;
-  private workspaceId: string | null = null;
   private logger: Logger;
   private options: ApiClientOptions;
 
@@ -110,10 +175,6 @@ export class ApiClient {
     this.token = token;
   }
 
-  setWorkspaceId(id: string | null) {
-    this.workspaceId = id;
-  }
-
   private readCsrfToken(): string | null {
     if (typeof document === "undefined") return null;
     const match = document.cookie
@@ -125,15 +186,23 @@ export class ApiClient {
   private authHeaders(): Record<string, string> {
     const headers: Record<string, string> = {};
     if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
-    if (this.workspaceId) headers["X-Workspace-ID"] = this.workspaceId;
+    const slug = getCurrentSlug();
+    if (slug) headers["X-Workspace-Slug"] = slug;
     const csrf = this.readCsrfToken();
     if (csrf) headers["X-CSRF-Token"] = csrf;
+    const id = this.options.identity;
+    if (id?.platform) headers["X-Client-Platform"] = id.platform;
+    if (id?.version) headers["X-Client-Version"] = id.version;
+    if (id?.os) headers["X-Client-OS"] = id.os;
     return headers;
   }
 
   private handleUnauthorized() {
     this.token = null;
-    this.workspaceId = null;
+    // Workspace id is owned by the URL-driven workspace-storage singleton
+    // (set by [workspaceSlug]/layout.tsx). On 401, the auth flow navigates
+    // to /login which leaves the workspace route, and the next workspace
+    // entry will overwrite the id. No clear needed here.
     this.options.onUnauthorized?.();
   }
 
@@ -219,6 +288,62 @@ export class ApiClient {
     return this.fetch("/api/me");
   }
 
+  async markOnboardingComplete(payload?: {
+    completion_path?: OnboardingCompletionPath;
+  }): Promise<User> {
+    return this.fetch("/api/me/onboarding/complete", {
+      method: "POST",
+      body: payload ? JSON.stringify(payload) : undefined,
+    });
+  }
+
+  async joinCloudWaitlist(payload: {
+    email: string;
+    reason?: string;
+  }): Promise<User> {
+    return this.fetch("/api/me/onboarding/cloud-waitlist", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async patchOnboarding(payload: {
+    questionnaire?: Record<string, unknown>;
+  }): Promise<User> {
+    return this.fetch("/api/me/onboarding", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /**
+   * Imports the Getting Started project + optional welcome issue + sub-issues
+   * in a single server-side transaction. Gated by an atomic
+   * starter_content_state: NULL → 'imported' claim — a second call returns
+   * 409 (already decided) and creates nothing new.
+   *
+   * The content templates live in TypeScript (see
+   * @multica/views/onboarding/utils/starter-content-templates) and are
+   * rendered from the user's questionnaire answers before being sent.
+   */
+  async importStarterContent(
+    payload: ImportStarterContentPayload,
+  ): Promise<ImportStarterContentResponse> {
+    return this.fetch("/api/me/starter-content/import", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async dismissStarterContent(payload?: {
+    workspace_id?: string;
+  }): Promise<User> {
+    return this.fetch("/api/me/starter-content/dismiss", {
+      method: "POST",
+      body: payload ? JSON.stringify(payload) : undefined,
+    });
+  }
+
   async updateMe(data: UpdateMeRequest): Promise<User> {
     return this.fetch("/api/me", {
       method: "PATCH",
@@ -231,13 +356,13 @@ export class ApiClient {
     const search = new URLSearchParams();
     if (params?.limit) search.set("limit", String(params.limit));
     if (params?.offset) search.set("offset", String(params.offset));
-    const wsId = params?.workspace_id ?? this.workspaceId;
-    if (wsId) search.set("workspace_id", wsId);
+    if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
     if (params?.status) search.set("status", params.status);
     if (params?.priority) search.set("priority", params.priority);
     if (params?.assignee_id) search.set("assignee_id", params.assignee_id);
     if (params?.assignee_ids?.length) search.set("assignee_ids", params.assignee_ids.join(","));
     if (params?.creator_id) search.set("creator_id", params.creator_id);
+    if (params?.project_id) search.set("project_id", params.project_id);
     if (params?.open_only) search.set("open_only", "true");
     return this.fetch(`/api/issues?${search}`);
   }
@@ -263,9 +388,18 @@ export class ApiClient {
   }
 
   async createIssue(data: CreateIssueRequest): Promise<Issue> {
-    const search = new URLSearchParams();
-    if (this.workspaceId) search.set("workspace_id", this.workspaceId);
-    return this.fetch(`/api/issues?${search}`, {
+    return this.fetch("/api/issues", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async createFeedback(data: {
+    message: string;
+    url?: string;
+    workspace_id?: string;
+  }): Promise<{ id: string; created_at: string }> {
+    return this.fetch("/api/feedback", {
       method: "POST",
       body: JSON.stringify(data),
     });
@@ -396,8 +530,7 @@ export class ApiClient {
   // Agents
   async listAgents(params?: { workspace_id?: string; include_archived?: boolean }): Promise<Agent[]> {
     const search = new URLSearchParams();
-    const wsId = params?.workspace_id ?? this.workspaceId;
-    if (wsId) search.set("workspace_id", wsId);
+    if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
     if (params?.include_archived) search.set("include_archived", "true");
     return this.fetch(`/api/agents?${search}`);
   }
@@ -430,8 +563,7 @@ export class ApiClient {
 
   async listRuntimes(params?: { workspace_id?: string; owner?: "me" }): Promise<AgentRuntime[]> {
     const search = new URLSearchParams();
-    const wsId = params?.workspace_id ?? this.workspaceId;
-    if (wsId) search.set("workspace_id", wsId);
+    if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
     if (params?.owner) search.set("owner", params.owner);
     return this.fetch(`/api/runtimes?${search}`);
   }
@@ -450,14 +582,6 @@ export class ApiClient {
     return this.fetch(`/api/runtimes/${runtimeId}/activity`);
   }
 
-  async pingRuntime(runtimeId: string): Promise<RuntimePing> {
-    return this.fetch(`/api/runtimes/${runtimeId}/ping`, { method: "POST" });
-  }
-
-  async getPingResult(runtimeId: string, pingId: string): Promise<RuntimePing> {
-    return this.fetch(`/api/runtimes/${runtimeId}/ping/${pingId}`);
-  }
-
   async initiateUpdate(
     runtimeId: string,
     targetVersion: string,
@@ -473,6 +597,49 @@ export class ApiClient {
     updateId: string,
   ): Promise<RuntimeUpdate> {
     return this.fetch(`/api/runtimes/${runtimeId}/update/${updateId}`);
+  }
+
+  async initiateListModels(runtimeId: string): Promise<RuntimeModelListRequest> {
+    return this.fetch(`/api/runtimes/${runtimeId}/models`, { method: "POST" });
+  }
+
+  async getListModelsResult(
+    runtimeId: string,
+    requestId: string,
+  ): Promise<RuntimeModelListRequest> {
+    return this.fetch(`/api/runtimes/${runtimeId}/models/${requestId}`);
+  }
+
+  async initiateListLocalSkills(
+    runtimeId: string,
+  ): Promise<RuntimeLocalSkillListRequest> {
+    return this.fetch(`/api/runtimes/${runtimeId}/local-skills`, {
+      method: "POST",
+    });
+  }
+
+  async getListLocalSkillsResult(
+    runtimeId: string,
+    requestId: string,
+  ): Promise<RuntimeLocalSkillListRequest> {
+    return this.fetch(`/api/runtimes/${runtimeId}/local-skills/${requestId}`);
+  }
+
+  async initiateImportLocalSkill(
+    runtimeId: string,
+    data: CreateRuntimeLocalSkillImportRequest,
+  ): Promise<RuntimeLocalSkillImportRequest> {
+    return this.fetch(`/api/runtimes/${runtimeId}/local-skills/import`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async getImportLocalSkillResult(
+    runtimeId: string,
+    requestId: string,
+  ): Promise<RuntimeLocalSkillImportRequest> {
+    return this.fetch(`/api/runtimes/${runtimeId}/local-skills/import/${requestId}`);
   }
 
   async listAgentTasks(agentId: string): Promise<AgentTask[]> {
@@ -535,7 +702,13 @@ export class ApiClient {
   }
 
   // App Config
-  async getConfig(): Promise<{ cdn_domain: string }> {
+  async getConfig(): Promise<{
+    cdn_domain: string;
+    allow_signup: boolean;
+    google_client_id?: string;
+    posthog_key?: string;
+    posthog_host?: string;
+  }> {
     return this.fetch("/api/config");
   }
 
@@ -788,9 +961,7 @@ export class ApiClient {
   }
 
   async createProject(data: CreateProjectRequest): Promise<Project> {
-    const search = new URLSearchParams();
-    if (this.workspaceId) search.set("workspace_id", this.workspaceId);
-    return this.fetch(`/api/projects?${search}`, {
+    return this.fetch("/api/projects", {
       method: "POST",
       body: JSON.stringify(data),
     });

@@ -4,21 +4,19 @@ import { useMemo } from "react";
 import { ApiClient } from "../api/client";
 import { setApiInstance } from "../api";
 import { createAuthStore, registerAuthStore } from "../auth";
-import { createWorkspaceStore, registerWorkspaceStore } from "../workspace";
 import { createChatStore, registerChatStore } from "../chat";
 import { WSProvider } from "../realtime";
 import { QueryProvider } from "../provider";
 import { createLogger } from "../logger";
 import { defaultStorage } from "./storage";
 import { AuthInitializer } from "./auth-initializer";
-import type { CoreProviderProps } from "./types";
+import type { CoreProviderProps, ClientIdentity } from "./types";
 import type { StorageAdapter } from "../types/storage";
 
 // Module-level singletons — created once at first render, never recreated.
 // Vite HMR preserves module-level state, so these survive hot reloads.
 let initialized = false;
 let authStore: ReturnType<typeof createAuthStore>;
-let workspaceStore: ReturnType<typeof createWorkspaceStore>;
 let chatStore: ReturnType<typeof createChatStore>;
 function initCore(
   apiBaseUrl: string,
@@ -26,6 +24,7 @@ function initCore(
   onLogin?: () => void,
   onLogout?: () => void,
   cookieAuth?: boolean,
+  identity?: ClientIdentity,
 ) {
   if (initialized) return;
 
@@ -33,8 +32,8 @@ function initCore(
     logger: createLogger("api"),
     onUnauthorized: () => {
       storage.removeItem("multica_token");
-      storage.removeItem("multica_workspace_id");
     },
+    identity,
   });
   setApiInstance(api);
 
@@ -43,14 +42,13 @@ function initCore(
     const token = storage.getItem("multica_token");
     if (token) api.setToken(token);
   }
-  const wsId = storage.getItem("multica_workspace_id");
-  if (wsId) api.setWorkspaceId(wsId);
+  // Workspace identity is URL-driven: the [workspaceSlug] layout resolves
+  // the slug and calls setCurrentWorkspace(slug, wsId) on mount. The api
+  // client reads the slug from that singleton for the X-Workspace-Slug
+  // header. No boot-time hydration from storage is required.
 
   authStore = createAuthStore({ api, storage, onLogin, onLogout, cookieAuth });
   registerAuthStore(authStore);
-
-  workspaceStore = createWorkspaceStore(api, { storage });
-  registerWorkspaceStore(workspaceStore);
 
   chatStore = createChatStore({ storage });
   registerChatStore(chatStore);
@@ -66,21 +64,28 @@ export function CoreProvider({
   cookieAuth,
   onLogin,
   onLogout,
+  identity,
 }: CoreProviderProps) {
   // Initialize singletons on first render only. Dependencies are read-once:
   // apiBaseUrl, storage, and callbacks are set at app boot and never change at runtime.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useMemo(() => initCore(apiBaseUrl, storage, onLogin, onLogout, cookieAuth), []);
+  useMemo(() => initCore(apiBaseUrl, storage, onLogin, onLogout, cookieAuth, identity), []);
 
   return (
     <QueryProvider>
-      <AuthInitializer onLogin={onLogin} onLogout={onLogout} storage={storage} cookieAuth={cookieAuth}>
+      <AuthInitializer
+        onLogin={onLogin}
+        onLogout={onLogout}
+        storage={storage}
+        cookieAuth={cookieAuth}
+        identity={identity}
+      >
         <WSProvider
           wsUrl={wsUrl}
           authStore={authStore}
-          workspaceStore={workspaceStore}
           storage={storage}
           cookieAuth={cookieAuth}
+          identity={identity}
         >
           {children}
         </WSProvider>

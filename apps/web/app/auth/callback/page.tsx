@@ -3,9 +3,9 @@
 import { Suspense, useEffect, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
-import { useAuthStore } from "@multica/core/auth";
-import { useWorkspaceStore } from "@multica/core/workspace";
+import { sanitizeNextUrl, useAuthStore } from "@multica/core/auth";
 import { workspaceKeys } from "@multica/core/workspace/queries";
+import { paths, resolvePostAuthDestination } from "@multica/core/paths";
 import { api } from "@multica/core/api";
 import {
   Card,
@@ -22,7 +22,6 @@ function CallbackContent() {
   const searchParams = useSearchParams();
   const qc = useQueryClient();
   const loginWithGoogle = useAuthStore((s) => s.loginWithGoogle);
-  const hydrateWorkspace = useWorkspaceStore((s) => s.hydrateWorkspace);
   const [error, setError] = useState("");
   const [desktopToken, setDesktopToken] = useState<string | null>(null);
 
@@ -43,7 +42,9 @@ function CallbackContent() {
     const stateParts = state.split(",");
     const isDesktop = stateParts.includes("platform:desktop");
     const nextPart = stateParts.find((p) => p.startsWith("next:"));
-    const nextUrl = nextPart ? nextPart.slice(5) : null; // strip "next:" prefix
+    // Strip "next:" prefix, then drop anything that isn't a safe relative path
+    // so an attacker-controlled `state=next:https://evil` cannot redirect here.
+    const nextUrl = sanitizeNextUrl(nextPart ? nextPart.slice(5) : null);
 
     const redirectUri = `${window.location.origin}/auth/callback`;
 
@@ -61,20 +62,23 @@ function CallbackContent() {
     } else {
       // Normal web flow
       loginWithGoogle(code, redirectUri)
-        .then(async () => {
+        .then(async (loggedInUser) => {
           const wsList = await api.listWorkspaces();
           qc.setQueryData(workspaceKeys.list(), wsList);
-          const lastWsId = localStorage.getItem("multica_workspace_id");
-          const ws = await hydrateWorkspace(wsList, lastWsId);
-          // Honor the ?next= redirect if present (e.g. /invite/{id})
-          const defaultDest = ws ? "/issues" : "/onboarding";
-          router.push(nextUrl || defaultDest);
+          const onboarded = loggedInUser.onboarded_at != null;
+          if (!onboarded) {
+            router.push(paths.onboarding());
+            return;
+          }
+          router.push(
+            nextUrl || resolvePostAuthDestination(wsList, onboarded),
+          );
         })
         .catch((err) => {
           setError(err instanceof Error ? err.message : "Login failed");
         });
     }
-  }, [searchParams, loginWithGoogle, hydrateWorkspace, router, qc]);
+  }, [searchParams, loginWithGoogle, router, qc]);
 
   if (desktopToken) {
     return (
@@ -111,7 +115,7 @@ function CallbackContent() {
             <CardDescription>{error}</CardDescription>
           </CardHeader>
           <CardContent className="flex justify-center">
-            <a href="/login" className="text-primary underline-offset-4 hover:underline">
+            <a href={paths.login()} className="text-primary underline-offset-4 hover:underline">
               Back to login
             </a>
           </CardContent>

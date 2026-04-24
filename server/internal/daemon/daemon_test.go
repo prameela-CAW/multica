@@ -2,15 +2,41 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
+	"github.com/multica-ai/multica/server/internal/daemon/repocache"
 	"github.com/multica-ai/multica/server/pkg/agent"
 )
+
+func createDaemonTestRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, args := range [][]string{
+		{"init", dir},
+		{"-C", dir, "commit", "--allow-empty", "-m", "initial"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git setup failed: %s: %v", out, err)
+		}
+	}
+	return dir
+}
 
 func TestNormalizeServerBaseURL(t *testing.T) {
 	t.Parallel()
@@ -86,20 +112,92 @@ func TestBuildPromptCommentTriggered(t *testing.T) {
 		Agent:                 &AgentData{Name: "Test"},
 	})
 
-	// Prompt should contain the comment content directly.
+	// Prompt should contain the comment content, the trigger comment id, and
+	// the full reply command with --parent. Re-emitting --parent on every turn
+	// is what prevents resumed sessions from reusing the previous turn's
+	// --parent UUID.
 	for _, want := range []string{
 		issueID,
 		commentContent,
-		"comment that triggered this task",
+		"Focus on THIS comment",
+		commentID,
+		"multica issue comment add " + issueID + " --parent " + commentID,
+		"do NOT reuse --parent values from previous turns",
+		// Silence-as-valid-exit for agent-to-agent loops depends on the
+		// reply command being framed conditionally rather than as a hard
+		// requirement. Guard the phrasing so the conflict with the new
+		// workflow (MUL-1323) doesn't come back.
+		"If you decide to reply",
 	} {
 		if !strings.Contains(prompt, want) {
-			t.Fatalf("prompt missing %q", want)
+			t.Fatalf("prompt missing %q\n---\n%s", want, prompt)
 		}
 	}
 
 	// Should still contain CLI hint for fetching issue context.
 	if !strings.Contains(prompt, "multica issue get") {
 		t.Fatal("prompt missing CLI hint for issue context")
+	}
+}
+
+// TestBuildPromptCommentTriggeredByAgent covers the agent-to-agent mention
+// loop signal injected into the per-turn prompt (MUL-1323 / GH#1576). When
+// the triggering comment was posted by another agent, the prompt must name
+// the author, warn against sign-off @mentions, and point at silence as a
+// valid exit.
+func TestBuildPromptCommentTriggeredByAgent(t *testing.T) {
+	t.Parallel()
+
+	prompt := BuildPrompt(Task{
+		IssueID:               "issue-1",
+		TriggerCommentID:      "comment-1",
+		TriggerCommentContent: "thanks, looks good!",
+		TriggerAuthorType:     "agent",
+		TriggerAuthorName:     "Atlas",
+		Agent:                 &AgentData{Name: "Test"},
+	})
+
+	for _, want := range []string{
+		"Another agent (Atlas)",
+		"do not @mention the other agent as a sign-off",
+		"silence is the preferred way",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q\n---\n%s", want, prompt)
+		}
+	}
+}
+
+// TestBuildPromptCommentTriggeredByMember guards against the agent-loop warning
+// leaking into human-authored triggers — a human asking a question should not
+// be pre-discouraged from getting a reply.
+func TestBuildPromptCommentTriggeredByMember(t *testing.T) {
+	t.Parallel()
+
+	prompt := BuildPrompt(Task{
+		IssueID:               "issue-1",
+		TriggerCommentID:      "comment-1",
+		TriggerCommentContent: "can you translate this?",
+		TriggerAuthorType:     "member",
+		TriggerAuthorName:     "Alice",
+		Agent:                 &AgentData{Name: "Test"},
+	})
+
+	if !strings.Contains(prompt, "A user just left a new comment") {
+		t.Fatalf("member-triggered prompt should label the author as a user\n---\n%s", prompt)
+	}
+	if strings.Contains(prompt, "Another agent") {
+		t.Fatalf("member-triggered prompt should not claim the author was another agent")
+	}
+	// Must NOT use the old "You MUST respond" language — that conflicts with
+	// the agent-to-agent silence-as-valid-exit workflow. Even on human-authored
+	// triggers, the reply command is framed conditionally for a single
+	// consistent rule across turn types.
+	if strings.Contains(prompt, "MUST respond") {
+		t.Fatalf("prompt should not contain unconditional \"MUST respond\" language\n---\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "If you decide to reply") {
+		t.Fatalf("prompt should frame the reply command conditionally\n---\n%s", prompt)
 	}
 }
 
@@ -198,6 +296,19 @@ func newTestDaemon(t *testing.T) *Daemon {
 	}
 }
 
+func newRepoReadyTestDaemon(t *testing.T, handler http.HandlerFunc) *Daemon {
+	t.Helper()
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+	return &Daemon{
+		client:       NewClient(srv.URL),
+		repoCache:    repocache.New(t.TempDir(), slog.Default()),
+		logger:       slog.Default(),
+		workspaces:   make(map[string]*workspaceState),
+		runtimeIndex: make(map[string]Runtime),
+	}
+}
+
 func TestExecuteAndDrain_ResumeFailureFallback(t *testing.T) {
 	t.Parallel()
 
@@ -278,5 +389,164 @@ func TestExecuteAndDrain_NoRetryWhenSessionEstablished(t *testing.T) {
 	}
 	if int(fb.idx.Load()) != 1 {
 		t.Fatalf("expected 1 call, got %d", fb.idx.Load())
+	}
+}
+
+func TestEnsureRepoReadyFastPathDoesNotRefresh(t *testing.T) {
+	t.Parallel()
+
+	sourceRepo := createDaemonTestRepo(t)
+	var refreshCalls atomic.Int32
+	d := newRepoReadyTestDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		refreshCalls.Add(1)
+		http.Error(w, "unexpected refresh", http.StatusInternalServerError)
+	})
+	if err := d.repoCache.Sync("ws-1", []repocache.RepoInfo{{URL: sourceRepo}}); err != nil {
+		t.Fatalf("seed repo cache: %v", err)
+	}
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "v1", []RepoData{{URL: sourceRepo}})
+
+	if err := d.ensureRepoReady(context.Background(), "ws-1", sourceRepo); err != nil {
+		t.Fatalf("ensureRepoReady: %v", err)
+	}
+	if got := refreshCalls.Load(); got != 0 {
+		t.Fatalf("expected no refresh calls, got %d", got)
+	}
+}
+
+func TestEnsureRepoReadyTrimsURL(t *testing.T) {
+	t.Parallel()
+
+	sourceRepo := createDaemonTestRepo(t)
+	var refreshCalls atomic.Int32
+	d := newRepoReadyTestDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		refreshCalls.Add(1)
+		http.Error(w, "unexpected refresh", http.StatusInternalServerError)
+	})
+	if err := d.repoCache.Sync("ws-1", []repocache.RepoInfo{{URL: sourceRepo}}); err != nil {
+		t.Fatalf("seed repo cache: %v", err)
+	}
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "v1", []RepoData{{URL: sourceRepo}})
+
+	// URL with trailing whitespace should still hit the fast path.
+	if err := d.ensureRepoReady(context.Background(), "ws-1", "  "+sourceRepo+"  "); err != nil {
+		t.Fatalf("ensureRepoReady with padded URL: %v", err)
+	}
+	if got := refreshCalls.Load(); got != 0 {
+		t.Fatalf("expected no refresh calls for trimmed URL, got %d", got)
+	}
+}
+
+func TestEnsureRepoReadyRefreshesOnMiss(t *testing.T) {
+	t.Parallel()
+
+	sourceRepo := createDaemonTestRepo(t)
+	var refreshCalls atomic.Int32
+	d := newRepoReadyTestDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/daemon/workspaces/ws-1/repos" {
+			http.NotFound(w, r)
+			return
+		}
+		refreshCalls.Add(1)
+		json.NewEncoder(w).Encode(WorkspaceReposResponse{
+			WorkspaceID:  "ws-1",
+			Repos:        []RepoData{{URL: sourceRepo, Description: "repo"}},
+			ReposVersion: "v2",
+		})
+	})
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil)
+
+	if err := d.ensureRepoReady(context.Background(), "ws-1", sourceRepo); err != nil {
+		t.Fatalf("ensureRepoReady: %v", err)
+	}
+	if got := refreshCalls.Load(); got != 1 {
+		t.Fatalf("expected 1 refresh call, got %d", got)
+	}
+	if d.repoCache.Lookup("ws-1", sourceRepo) == "" {
+		t.Fatal("expected repo to be cached after refresh")
+	}
+}
+
+func TestEnsureRepoReadyReturnsNotConfigured(t *testing.T) {
+	t.Parallel()
+
+	d := newRepoReadyTestDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(WorkspaceReposResponse{
+			WorkspaceID:  "ws-1",
+			Repos:        []RepoData{},
+			ReposVersion: "v1",
+		})
+	})
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil)
+
+	err := d.ensureRepoReady(context.Background(), "ws-1", "git@example.com:team/api.git")
+	if !errors.Is(err, ErrRepoNotConfigured) {
+		t.Fatalf("expected ErrRepoNotConfigured, got %v", err)
+	}
+}
+
+func TestEnsureRepoReadyReportsSyncFailure(t *testing.T) {
+	t.Parallel()
+
+	missingRepo := filepath.Join(t.TempDir(), "missing-repo")
+	d := newRepoReadyTestDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(WorkspaceReposResponse{
+			WorkspaceID:  "ws-1",
+			Repos:        []RepoData{{URL: missingRepo, Description: "missing"}},
+			ReposVersion: "v1",
+		})
+	})
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil)
+
+	err := d.ensureRepoReady(context.Background(), "ws-1", missingRepo)
+	if err == nil || !strings.Contains(err.Error(), "repo is configured but not synced:") {
+		t.Fatalf("expected sync failure error, got %v", err)
+	}
+	if got := d.workspaceLastRepoSyncErr("ws-1"); got == "" {
+		t.Fatal("expected lastRepoSyncErr to be recorded")
+	}
+}
+
+func TestEnsureRepoReadyConcurrentMissRefreshesOnce(t *testing.T) {
+	t.Parallel()
+
+	sourceRepo := createDaemonTestRepo(t)
+	var refreshCalls atomic.Int32
+	d := newRepoReadyTestDaemon(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/daemon/workspaces/ws-1/repos" {
+			http.NotFound(w, r)
+			return
+		}
+		refreshCalls.Add(1)
+		json.NewEncoder(w).Encode(WorkspaceReposResponse{
+			WorkspaceID:  "ws-1",
+			Repos:        []RepoData{{URL: sourceRepo, Description: "repo"}},
+			ReposVersion: "v2",
+		})
+	})
+	d.workspaces["ws-1"] = newWorkspaceState("ws-1", nil, "", nil)
+
+	const concurrency = 8
+	var wg sync.WaitGroup
+	errCh := make(chan error, concurrency)
+	for range concurrency {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- d.ensureRepoReady(context.Background(), "ws-1", sourceRepo)
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("ensureRepoReady returned error: %v", err)
+		}
+	}
+	// All 8 goroutines race on a cold miss; the per-workspace mutex
+	// must serialize them so the server is only called once.
+	if got := refreshCalls.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 refresh call, got %d", got)
 	}
 }

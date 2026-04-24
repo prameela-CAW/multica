@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,14 +16,22 @@ import (
 	"github.com/multica-ai/multica/server/internal/cli"
 	"github.com/multica-ai/multica/server/internal/daemon/execenv"
 	"github.com/multica-ai/multica/server/internal/daemon/repocache"
-	"github.com/multica-ai/multica/server/internal/daemon/usage"
 	"github.com/multica-ai/multica/server/pkg/agent"
 )
 
+// ErrRepoNotConfigured is returned by ensureRepoReady when the requested repo
+// URL is not present in the workspace's repo configuration after a fresh
+// server refresh.
+var ErrRepoNotConfigured = errors.New("repo is not configured for this workspace")
+
 // workspaceState tracks registered runtimes for a single workspace.
 type workspaceState struct {
-	workspaceID string
-	runtimeIDs  []string
+	workspaceID     string
+	runtimeIDs      []string
+	reposVersion    string // stored for future use: skip refresh when version unchanged
+	allowedRepoURLs map[string]struct{}
+	lastRepoSyncErr string
+	repoRefreshMu   sync.Mutex
 }
 
 // Daemon is the local agent runtime that polls for and executes tasks.
@@ -34,7 +44,10 @@ type Daemon struct {
 	mu           sync.Mutex
 	workspaces   map[string]*workspaceState
 	runtimeIndex map[string]Runtime // runtimeID -> Runtime for provider lookups
-	reloading    sync.Mutex         // prevents concurrent reloadWorkspaces
+	reloading    sync.Mutex         // prevents concurrent workspace syncs
+
+	versionsMu    sync.RWMutex      // guards agentVersions
+	agentVersions map[string]string // provider -> detected CLI version (set during registration)
 
 	cancelFunc    context.CancelFunc // set by Run(); called by triggerRestart
 	restartBinary string             // non-empty after a successful update; path to the new binary
@@ -45,14 +58,35 @@ type Daemon struct {
 // New creates a new Daemon instance.
 func New(cfg Config, logger *slog.Logger) *Daemon {
 	cacheRoot := filepath.Join(cfg.WorkspacesRoot, ".repos")
+	client := NewClient(cfg.ServerBaseURL)
+	// Tag every daemon HTTP request with the daemon's CLI version so the
+	// server can split logs/metrics by client version (parallel to the CLI).
+	client.SetVersion(cfg.CLIVersion)
 	return &Daemon{
-		cfg:          cfg,
-		client:       NewClient(cfg.ServerBaseURL),
-		repoCache:    repocache.New(cacheRoot, logger),
-		logger:       logger,
-		workspaces:   make(map[string]*workspaceState),
-		runtimeIndex: make(map[string]Runtime),
+		cfg:           cfg,
+		client:        client,
+		repoCache:     repocache.New(cacheRoot, logger),
+		logger:        logger,
+		workspaces:    make(map[string]*workspaceState),
+		runtimeIndex:  make(map[string]Runtime),
+		agentVersions: make(map[string]string),
 	}
+}
+
+// setAgentVersion records the detected CLI version for an agent provider so
+// later task-dispatch code (e.g. Codex sandbox policy) can read it.
+func (d *Daemon) setAgentVersion(provider, version string) {
+	d.versionsMu.Lock()
+	defer d.versionsMu.Unlock()
+	d.agentVersions[provider] = version
+}
+
+// agentVersion returns the last-detected CLI version for an agent provider,
+// or an empty string if unknown.
+func (d *Daemon) agentVersion(provider string) string {
+	d.versionsMu.RLock()
+	defer d.versionsMu.RUnlock()
+	return d.agentVersions[provider]
 }
 
 // Run starts the daemon: resolves auth, registers runtimes, then polls for tasks.
@@ -82,12 +116,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 
-	// Fetch all user workspaces from the API and register runtimes.
+	// Fetch all user workspaces from the API and register runtimes for any
+	// that exist. Zero workspaces is a valid state — a newly-signed-up user
+	// may start the daemon before creating their first workspace. The
+	// workspaceSyncLoop below polls every 30s and will register runtimes
+	// when a workspace appears, so the daemon stays useful as a long-lived
+	// background process rather than crashing at startup.
 	if err := d.syncWorkspacesFromAPI(ctx); err != nil {
 		return err
-	}
-	if len(d.allRuntimeIDs()) == 0 {
-		return fmt.Errorf("no runtimes registered")
 	}
 
 	// Deregister runtimes on shutdown (uses a fresh context since ctx will be cancelled).
@@ -97,7 +133,6 @@ func (d *Daemon) Run(ctx context.Context) error {
 	go d.workspaceSyncLoop(ctx)
 
 	go d.heartbeatLoop(ctx)
-	go d.usageScanLoop(ctx)
 	go d.gcLoop(ctx)
 	go d.serveHealth(ctx, healthLn, time.Now())
 	return d.pollLoop(ctx)
@@ -145,7 +180,6 @@ func (d *Daemon) resolveAuth() error {
 	return nil
 }
 
-
 // allRuntimeIDs returns all runtime IDs across all watched workspaces.
 func (d *Daemon) allRuntimeIDs() []string {
 	d.mu.Lock()
@@ -167,17 +201,6 @@ func (d *Daemon) findRuntime(id string) *Runtime {
 	return nil
 }
 
-// providerToRuntimeMap returns a mapping from provider name to runtime ID.
-func (d *Daemon) providerToRuntimeMap() map[string]string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	m := make(map[string]string)
-	for id, rt := range d.runtimeIndex {
-		m[rt.Provider] = id
-	}
-	return m
-}
-
 func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID string) (*RegisterResponse, error) {
 	var runtimes []map[string]string
 	for name, entry := range d.cfg.Agents {
@@ -190,6 +213,7 @@ func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID s
 			d.logger.Warn("skip registering runtime: version too old", "name", name, "version", version, "error", err)
 			continue
 		}
+		d.setAgentVersion(name, version)
 		displayName := strings.ToUpper(name[:1]) + name[1:]
 		if d.cfg.DeviceName != "" {
 			displayName = fmt.Sprintf("%s (%s)", displayName, d.cfg.DeviceName)
@@ -206,12 +230,13 @@ func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID s
 	}
 
 	req := map[string]any{
-		"workspace_id": workspaceID,
-		"daemon_id":    d.cfg.DaemonID,
-		"device_name":  d.cfg.DeviceName,
-		"cli_version":  d.cfg.CLIVersion,
-		"launched_by":  d.cfg.LaunchedBy,
-		"runtimes":     runtimes,
+		"workspace_id":      workspaceID,
+		"daemon_id":         d.cfg.DaemonID,
+		"legacy_daemon_ids": d.cfg.LegacyDaemonIDs,
+		"device_name":       d.cfg.DeviceName,
+		"cli_version":       d.cfg.CLIVersion,
+		"launched_by":       d.cfg.LaunchedBy,
+		"runtimes":          runtimes,
 	}
 
 	resp, err := d.client.Register(ctx, req)
@@ -222,6 +247,133 @@ func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID s
 		return nil, fmt.Errorf("register runtimes: empty response")
 	}
 	return resp, nil
+}
+
+func newWorkspaceState(workspaceID string, runtimeIDs []string, reposVersion string, repos []RepoData) *workspaceState {
+	return &workspaceState{
+		workspaceID:     workspaceID,
+		runtimeIDs:      runtimeIDs,
+		reposVersion:    reposVersion,
+		allowedRepoURLs: repoAllowlist(repos),
+	}
+}
+
+func repoAllowlist(repos []RepoData) map[string]struct{} {
+	allowed := make(map[string]struct{}, len(repos))
+	for _, repo := range repos {
+		if repo.URL == "" {
+			continue
+		}
+		allowed[repo.URL] = struct{}{}
+	}
+	return allowed
+}
+
+func (d *Daemon) setWorkspaceRepoSyncError(workspaceID, syncErr string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if ws, ok := d.workspaces[workspaceID]; ok {
+		ws.lastRepoSyncErr = syncErr
+	}
+}
+
+func (d *Daemon) workspaceRepoAllowed(workspaceID, repoURL string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ws, ok := d.workspaces[workspaceID]
+	if !ok {
+		return false
+	}
+	_, allowed := ws.allowedRepoURLs[repoURL]
+	return allowed
+}
+
+func (d *Daemon) workspaceLastRepoSyncErr(workspaceID string) string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	ws, ok := d.workspaces[workspaceID]
+	if !ok {
+		return ""
+	}
+	return ws.lastRepoSyncErr
+}
+
+func (d *Daemon) syncWorkspaceRepos(workspaceID string, repos []RepoData) {
+	if d.repoCache == nil {
+		return
+	}
+	if err := d.repoCache.Sync(workspaceID, repoDataToInfo(repos)); err != nil {
+		d.setWorkspaceRepoSyncError(workspaceID, err.Error())
+		d.logger.Warn("repo cache sync failed", "workspace_id", workspaceID, "error", err)
+		return
+	}
+	d.setWorkspaceRepoSyncError(workspaceID, "")
+}
+
+func (d *Daemon) refreshWorkspaceRepos(ctx context.Context, workspaceID string) (*WorkspaceReposResponse, error) {
+	refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	resp, err := d.client.GetWorkspaceRepos(refreshCtx, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+
+	d.mu.Lock()
+	if ws, ok := d.workspaces[workspaceID]; ok {
+		ws.reposVersion = resp.ReposVersion
+		ws.allowedRepoURLs = repoAllowlist(resp.Repos)
+	}
+	d.mu.Unlock()
+
+	return resp, nil
+}
+
+func (d *Daemon) ensureRepoReady(ctx context.Context, workspaceID, repoURL string) error {
+	if d.repoCache == nil {
+		return fmt.Errorf("repo cache not initialized")
+	}
+
+	repoURL = strings.TrimSpace(repoURL)
+
+	d.mu.Lock()
+	ws, ok := d.workspaces[workspaceID]
+	d.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("workspace is not watched by this daemon: %s", workspaceID)
+	}
+
+	if d.workspaceRepoAllowed(workspaceID, repoURL) && d.repoCache.Lookup(workspaceID, repoURL) != "" {
+		return nil
+	}
+
+	ws.repoRefreshMu.Lock()
+	defer ws.repoRefreshMu.Unlock()
+
+	if d.workspaceRepoAllowed(workspaceID, repoURL) && d.repoCache.Lookup(workspaceID, repoURL) != "" {
+		return nil
+	}
+
+	resp, err := d.refreshWorkspaceRepos(ctx, workspaceID)
+	if err != nil {
+		return fmt.Errorf("refresh workspace repos: %w", err)
+	}
+
+	if !d.workspaceRepoAllowed(workspaceID, repoURL) {
+		return ErrRepoNotConfigured
+	}
+
+	d.syncWorkspaceRepos(workspaceID, resp.Repos)
+
+	if d.repoCache.Lookup(workspaceID, repoURL) != "" {
+		return nil
+	}
+
+	if syncErr := d.workspaceLastRepoSyncErr(workspaceID); syncErr != "" {
+		return fmt.Errorf("repo is configured but not synced: %s", syncErr)
+	}
+
+	return fmt.Errorf("repo is configured but not synced")
 }
 
 // workspaceSyncLoop periodically fetches the user's workspaces from the API
@@ -272,7 +424,7 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context) error {
 	var registered int
 	for id, name := range apiIDs {
 		if currentIDs[id] {
-			continue
+			continue // important: never replace existing workspaceState; ensureRepoReady holds ws.repoRefreshMu from the original pointer
 		}
 		resp, err := d.registerRuntimesForWorkspace(ctx, id)
 		if err != nil {
@@ -285,21 +437,27 @@ func (d *Daemon) syncWorkspacesFromAPI(ctx context.Context) error {
 			d.logger.Info("registered runtime", "workspace_id", id, "runtime_id", rt.ID, "provider", rt.Provider)
 		}
 		d.mu.Lock()
-		d.workspaces[id] = &workspaceState{workspaceID: id, runtimeIDs: runtimeIDs}
+		d.workspaces[id] = newWorkspaceState(id, runtimeIDs, resp.ReposVersion, resp.Repos)
 		for _, rt := range resp.Runtimes {
 			d.runtimeIndex[rt.ID] = rt
 		}
 		d.mu.Unlock()
 
 		if d.repoCache != nil && len(resp.Repos) > 0 {
-			go func(wsID string, repos []RepoData) {
-				if err := d.repoCache.Sync(wsID, repoDataToInfo(repos)); err != nil {
-					d.logger.Warn("repo cache sync failed", "workspace_id", wsID, "error", err)
-				}
-			}(id, resp.Repos)
+			go d.syncWorkspaceRepos(id, resp.Repos)
 		}
 
-		d.logger.Info("watching workspace", "workspace_id", id, "name", name, "runtimes", len(resp.Runtimes))
+		// Tell the server about any tasks the previous daemon process was
+		// running on these runtimes. Without this, an issue can stay stuck
+		// at in_progress until the slow heartbeat sweeper or the in-flight
+		// task timeout (2.5h) kicks in.
+		for _, rid := range runtimeIDs {
+			if err := d.client.RecoverOrphans(ctx, rid); err != nil {
+				d.logger.Warn("recover-orphans failed", "runtime_id", rid, "error", err)
+			}
+		}
+
+		d.logger.Info("watching workspace", "workspace_id", id, "name", name, "runtimes", len(resp.Runtimes), "repos", len(resp.Repos))
 		registered++
 	}
 
@@ -340,106 +498,210 @@ func (d *Daemon) heartbeatLoop(ctx context.Context) {
 					continue
 				}
 
-				// Handle pending ping requests.
-				if resp.PendingPing != nil {
-					rt := d.findRuntime(rid)
-					if rt != nil {
-						go d.handlePing(ctx, *rt, resp.PendingPing.ID)
-					}
-				}
-
 				// Handle pending update requests.
 				if resp.PendingUpdate != nil {
 					go d.handleUpdate(ctx, rid, resp.PendingUpdate)
+				}
+
+				// Handle pending model-list requests.
+				if resp.PendingModelList != nil {
+					rt := d.findRuntime(rid)
+					if rt != nil {
+						go d.handleModelList(ctx, *rt, resp.PendingModelList.ID)
+					}
+				}
+
+				// Handle pending runtime-local-skill inventory requests.
+				if resp.PendingLocalSkills != nil {
+					rt := d.findRuntime(rid)
+					if rt != nil {
+						go d.handleLocalSkillList(ctx, *rt, resp.PendingLocalSkills.ID)
+					}
+				}
+
+				// Handle pending runtime-local-skill import requests.
+				if resp.PendingLocalSkillImport != nil {
+					rt := d.findRuntime(rid)
+					if rt != nil {
+						go d.handleLocalSkillImport(ctx, *rt, *resp.PendingLocalSkillImport)
+					}
 				}
 			}
 		}
 	}
 }
 
-func (d *Daemon) handlePing(ctx context.Context, rt Runtime, pingID string) {
-	d.logger.Info("ping requested", "runtime_id", rt.ID, "ping_id", pingID, "provider", rt.Provider)
-
-	start := time.Now()
+// handleModelList resolves the provider's supported models (via static
+// catalog or by shelling out to the agent CLI) and reports the result
+// back to the server. Model discovery failures are reported as empty
+// lists rather than errors so the UI can still render a creatable
+// dropdown.
+func (d *Daemon) handleModelList(ctx context.Context, rt Runtime, requestID string) {
+	d.logger.Info("model list requested", "runtime_id", rt.ID, "request_id", requestID, "provider", rt.Provider)
 
 	entry, ok := d.cfg.Agents[rt.Provider]
 	if !ok {
-		d.client.ReportPingResult(ctx, rt.ID, pingID, map[string]any{
-			"status":      "failed",
-			"error":       fmt.Sprintf("no agent configured for provider %q", rt.Provider),
-			"duration_ms": time.Since(start).Milliseconds(),
+		d.client.ReportModelListResult(ctx, rt.ID, requestID, map[string]any{
+			"status": "failed",
+			"error":  fmt.Sprintf("no agent configured for provider %q", rt.Provider),
 		})
 		return
 	}
 
-	backend, err := agent.New(rt.Provider, agent.Config{
-		ExecutablePath: entry.Path,
-		Logger:         d.logger,
-	})
+	models, err := agent.ListModels(ctx, rt.Provider, entry.Path)
 	if err != nil {
-		d.client.ReportPingResult(ctx, rt.ID, pingID, map[string]any{
-			"status":      "failed",
-			"error":       err.Error(),
-			"duration_ms": time.Since(start).Milliseconds(),
+		d.client.ReportModelListResult(ctx, rt.ID, requestID, map[string]any{
+			"status": "failed",
+			"error":  err.Error(),
 		})
 		return
 	}
 
-	pingCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	session, err := backend.Execute(pingCtx, "Respond with exactly one word: pong", agent.ExecOptions{
-		MaxTurns: 1,
-		Timeout:  60 * time.Second,
+	// Wire format matches handler.ModelEntry. Use a struct (not
+	// map[string]string) so the Default bool round-trips — without
+	// it the UI loses its "default" badge on the advertised pick.
+	type modelWire struct {
+		ID       string `json:"id"`
+		Label    string `json:"label"`
+		Provider string `json:"provider,omitempty"`
+		Default  bool   `json:"default,omitempty"`
+	}
+	wire := make([]modelWire, 0, len(models))
+	for _, m := range models {
+		wire = append(wire, modelWire{
+			ID:       m.ID,
+			Label:    m.Label,
+			Provider: m.Provider,
+			Default:  m.Default,
+		})
+	}
+	d.client.ReportModelListResult(ctx, rt.ID, requestID, map[string]any{
+		"status":    "completed",
+		"models":    wire,
+		"supported": agent.ModelSelectionSupported(rt.Provider),
 	})
+}
+
+func (d *Daemon) handleLocalSkillList(ctx context.Context, rt Runtime, requestID string) {
+	d.logger.Info("runtime local skills requested", "runtime_id", rt.ID, "request_id", requestID, "provider", rt.Provider)
+
+	skills, supported, err := listRuntimeLocalSkills(rt.Provider)
 	if err != nil {
-		d.client.ReportPingResult(ctx, rt.ID, pingID, map[string]any{
-			"status":      "failed",
-			"error":       err.Error(),
-			"duration_ms": time.Since(start).Milliseconds(),
+		d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
+			"status": "failed",
+			"error":  err.Error(),
 		})
 		return
 	}
 
-	// Drain messages
-	go func() {
-		for range session.Messages {
-		}
-	}()
+	d.reportLocalSkillListResult(ctx, rt, requestID, map[string]any{
+		"status":    "completed",
+		"skills":    skills,
+		"supported": supported,
+	})
+}
 
-	var result agent.Result
-	select {
-	case result = <-session.Result:
-	case <-pingCtx.Done():
-		d.logger.Warn("ping timed out waiting for result", "runtime_id", rt.ID, "ping_id", pingID)
-		d.client.ReportPingResult(ctx, rt.ID, pingID, map[string]any{
-			"status":      "failed",
-			"error":       "ping context cancelled while waiting for result",
-			"duration_ms": time.Since(start).Milliseconds(),
+func (d *Daemon) handleLocalSkillImport(ctx context.Context, rt Runtime, pending PendingLocalSkillImport) {
+	d.logger.Info("runtime local skill import requested", "runtime_id", rt.ID, "request_id", pending.ID, "provider", rt.Provider, "skill_key", pending.SkillKey)
+
+	skill, supported, err := loadRuntimeLocalSkillBundle(rt.Provider, pending.SkillKey)
+	if err != nil {
+		d.reportLocalSkillImportResult(ctx, rt, pending.ID, map[string]any{
+			"status": "failed",
+			"error":  err.Error(),
 		})
 		return
 	}
-	durationMs := time.Since(start).Milliseconds()
-
-	if result.Status == "completed" {
-		d.logger.Info("ping completed", "runtime_id", rt.ID, "ping_id", pingID, "duration_ms", durationMs)
-		d.client.ReportPingResult(ctx, rt.ID, pingID, map[string]any{
-			"status":      "completed",
-			"output":      result.Output,
-			"duration_ms": durationMs,
+	if !supported {
+		d.reportLocalSkillImportResult(ctx, rt, pending.ID, map[string]any{
+			"status": "failed",
+			"error":  fmt.Sprintf("provider %q does not expose runtime local skills", rt.Provider),
 		})
-	} else {
-		errMsg := result.Error
-		if errMsg == "" {
-			errMsg = fmt.Sprintf("agent returned status: %s", result.Status)
-		}
-		d.logger.Warn("ping failed", "runtime_id", rt.ID, "ping_id", pingID, "error", errMsg)
-		d.client.ReportPingResult(ctx, rt.ID, pingID, map[string]any{
-			"status":      "failed",
-			"error":       errMsg,
-			"duration_ms": durationMs,
-		})
+		return
 	}
+
+	d.reportLocalSkillImportResult(ctx, rt, pending.ID, map[string]any{
+		"status": "completed",
+		"skill":  skill,
+	})
+}
+
+// localSkillReportBackoffs defines the retry schedule for delivering a
+// local-skill result to the server. First attempt runs immediately, then we
+// back off. The sum (≈6.5s) stays well under the server-side running timeout
+// (60s) so a report that eventually lands still updates the request instead
+// of racing a timeout transition.
+//
+// Overridable for tests to avoid real sleeps.
+var localSkillReportBackoffs = []time.Duration{0, 500 * time.Millisecond, 2 * time.Second, 4 * time.Second}
+
+// reportLocalSkillListResult delivers a list-report to the server with retry
+// on transient failures. See reportLocalSkillResultWithRetry for semantics.
+func (d *Daemon) reportLocalSkillListResult(ctx context.Context, rt Runtime, requestID string, payload map[string]any) {
+	d.reportLocalSkillResultWithRetry(ctx, "list", rt.ID, requestID, func(ctx context.Context) error {
+		return d.client.ReportLocalSkillListResult(ctx, rt.ID, requestID, payload)
+	})
+}
+
+// reportLocalSkillImportResult delivers an import-report to the server with
+// retry on transient failures.
+func (d *Daemon) reportLocalSkillImportResult(ctx context.Context, rt Runtime, requestID string, payload map[string]any) {
+	d.reportLocalSkillResultWithRetry(ctx, "import", rt.ID, requestID, func(ctx context.Context) error {
+		return d.client.ReportLocalSkillImportResult(ctx, rt.ID, requestID, payload)
+	})
+}
+
+// reportLocalSkillResultWithRetry retries `fn` on 5xx / network errors and
+// stops on success, 4xx, or after exhausting localSkillReportBackoffs.
+//
+// Why this exists: the server persists the report through a Redis / DB
+// write; on a transient store failure it now correctly returns 500 (see
+// PR #1557). Without a client-side retry the daemon would fire once,
+// swallow the error, and the pending request stays in "running" on the
+// server until the 60s timeout — which is exactly the "daemon did not
+// respond" failure mode the whole store refactor was meant to fix. 4xx is
+// treated as permanent (request-not-found, cross-workspace token rejected,
+// bad body) — retrying those just wastes heartbeat cycles.
+func (d *Daemon) reportLocalSkillResultWithRetry(ctx context.Context, kind, runtimeID, requestID string, fn func(context.Context) error) {
+	var lastErr error
+	for attempt, wait := range localSkillReportBackoffs {
+		if wait > 0 {
+			select {
+			case <-ctx.Done():
+				d.logger.Error("local skill report cancelled",
+					"kind", kind, "runtime_id", runtimeID, "request_id", requestID,
+					"attempt", attempt, "error", ctx.Err())
+				return
+			case <-time.After(wait):
+			}
+		}
+		err := fn(ctx)
+		if err == nil {
+			if attempt > 0 {
+				d.logger.Info("local skill report succeeded after retry",
+					"kind", kind, "runtime_id", runtimeID, "request_id", requestID,
+					"attempt", attempt+1)
+			}
+			return
+		}
+		lastErr = err
+
+		// 4xx is permanent (request expired, workspace mismatch, malformed
+		// body). No amount of retrying will make it succeed.
+		var reqErr *requestError
+		if errors.As(err, &reqErr) && reqErr.StatusCode >= 400 && reqErr.StatusCode < 500 {
+			d.logger.Error("local skill report rejected — not retrying",
+				"kind", kind, "runtime_id", runtimeID, "request_id", requestID,
+				"status", reqErr.StatusCode, "error", err)
+			return
+		}
+
+		d.logger.Warn("local skill report failed — will retry",
+			"kind", kind, "runtime_id", runtimeID, "request_id", requestID,
+			"attempt", attempt+1, "error", err)
+	}
+	d.logger.Error("local skill report exhausted retries",
+		"kind", kind, "runtime_id", runtimeID, "request_id", requestID, "error", lastErr)
 }
 
 // handleUpdate performs the CLI update when triggered by the server via heartbeat.
@@ -534,62 +796,6 @@ func (d *Daemon) triggerRestart() {
 	// Cancel the main context to trigger graceful shutdown.
 	if d.cancelFunc != nil {
 		d.cancelFunc()
-	}
-}
-
-func (d *Daemon) usageScanLoop(ctx context.Context) {
-	scanner := usage.NewScanner(d.logger)
-
-	report := func() {
-		records := scanner.Scan()
-		if len(records) == 0 {
-			return
-		}
-
-		// Build provider -> runtime ID mapping from current state.
-		providerToRuntime := d.providerToRuntimeMap()
-
-		// Group records by provider to send to the correct runtime.
-		byProvider := make(map[string][]map[string]any)
-		for _, r := range records {
-			byProvider[r.Provider] = append(byProvider[r.Provider], map[string]any{
-				"date":               r.Date,
-				"provider":           r.Provider,
-				"model":              r.Model,
-				"input_tokens":       r.InputTokens,
-				"output_tokens":      r.OutputTokens,
-				"cache_read_tokens":  r.CacheReadTokens,
-				"cache_write_tokens": r.CacheWriteTokens,
-			})
-		}
-
-		for provider, entries := range byProvider {
-			runtimeID, ok := providerToRuntime[provider]
-			if !ok {
-				d.logger.Debug("no runtime for provider, skipping usage report", "provider", provider)
-				continue
-			}
-			if err := d.client.ReportUsage(ctx, runtimeID, entries); err != nil {
-				d.logger.Warn("usage report failed", "provider", provider, "runtime_id", runtimeID, "error", err)
-			} else {
-				d.logger.Info("usage reported", "provider", provider, "runtime_id", runtimeID, "entries", len(entries))
-			}
-		}
-	}
-
-	// Initial scan on startup.
-	report()
-
-	ticker := time.NewTicker(5 * time.Minute)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			report()
-		}
 	}
 }
 
@@ -702,7 +908,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task) {
 
 	if err := d.client.StartTask(ctx, task.ID); err != nil {
 		taskLog.Error("start task failed", "error", err)
-		if failErr := d.client.FailTask(ctx, task.ID, fmt.Sprintf("start task failed: %s", err.Error())); failErr != nil {
+		if failErr := d.client.FailTask(ctx, task.ID, fmt.Sprintf("start task failed: %s", err.Error()), "", "", "agent_error"); failErr != nil {
 			taskLog.Error("fail task after start error", "error", failErr)
 		}
 		return
@@ -747,7 +953,9 @@ func (d *Daemon) handleTask(ctx context.Context, task Task) {
 
 	if err != nil {
 		taskLog.Error("task failed", "error", err)
-		if failErr := d.client.FailTask(ctx, task.ID, err.Error()); failErr != nil {
+		// runTask returned without a TaskResult, so we don't have a SessionID
+		// to forward — best we can do is record the failure.
+		if failErr := d.client.FailTask(ctx, task.ID, err.Error(), "", "", "agent_error"); failErr != nil {
 			taskLog.Error("fail task callback failed", "error", failErr)
 		}
 		return
@@ -772,14 +980,18 @@ func (d *Daemon) handleTask(ctx context.Context, task Task) {
 
 	switch result.Status {
 	case "blocked":
-		if err := d.client.FailTask(ctx, task.ID, result.Comment); err != nil {
+		// Forward SessionID/WorkDir even on the blocked path: the agent may
+		// have built a real session before getting stuck (rate-limit, tool
+		// error, etc.) and we want the next chat turn to resume there
+		// rather than start over and "forget" the conversation.
+		if err := d.client.FailTask(ctx, task.ID, result.Comment, result.SessionID, result.WorkDir, "agent_error"); err != nil {
 			taskLog.Error("report blocked task failed", "error", err)
 		}
 	default:
 		taskLog.Info("task completed", "status", result.Status)
 		if err := d.client.CompleteTask(ctx, task.ID, result.Comment, result.BranchName, result.SessionID, result.WorkDir); err != nil {
 			taskLog.Error("complete task failed, falling back to fail", "error", err)
-			if failErr := d.client.FailTask(ctx, task.ID, fmt.Sprintf("complete task failed: %s", err.Error())); failErr != nil {
+			if failErr := d.client.FailTask(ctx, task.ID, fmt.Sprintf("complete task failed: %s", err.Error()), result.SessionID, result.WorkDir, "agent_error"); failErr != nil {
 				taskLog.Error("fail task fallback also failed", "error", failErr)
 			}
 		}
@@ -796,6 +1008,15 @@ func (d *Daemon) handleTask(ctx context.Context, task Task) {
 }
 
 func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLog *slog.Logger) (TaskResult, error) {
+	// Refuse to spawn an agent without a workspace. An empty workspace_id
+	// here would make MULTICA_WORKSPACE_ID empty in the agent env, and the
+	// CLI would otherwise silently fall back to the user-global config — a
+	// path that can leak operations into an unrelated workspace when
+	// multiple workspaces share a host.
+	if task.WorkspaceID == "" {
+		return TaskResult{}, fmt.Errorf("refusing to spawn agent: task has no workspace_id (task_id=%s)", task.ID)
+	}
+
 	entry, ok := d.cfg.Agents[provider]
 	if !ok {
 		return TaskResult{}, fmt.Errorf("no agent configured for provider %q", provider)
@@ -828,8 +1049,9 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 
 	// Try to reuse the workdir from a previous task on the same (agent, issue) pair.
 	var env *execenv.Environment
+	codexVersion := d.agentVersion("codex")
 	if task.PriorWorkDir != "" {
-		env = execenv.Reuse(task.PriorWorkDir, provider, taskCtx, d.logger)
+		env = execenv.Reuse(task.PriorWorkDir, provider, codexVersion, taskCtx, d.logger)
 	}
 	if env == nil {
 		var err error
@@ -839,6 +1061,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 			TaskID:         task.ID,
 			AgentName:      agentName,
 			Provider:       provider,
+			CodexVersion:   codexVersion,
 			Task:           taskCtx,
 		}, d.logger)
 		if err != nil {
@@ -916,11 +1139,44 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 
 	taskStart := time.Now()
 
+	var customArgs []string
+	var mcpConfig json.RawMessage
+	if task.Agent != nil {
+		customArgs = task.Agent.CustomArgs
+		mcpConfig = task.Agent.McpConfig
+	}
+	// Two-tier model resolution: an explicit agent.model wins,
+	// then the daemon-wide MULTICA_<PROVIDER>_MODEL env var. If
+	// both are empty we deliberately pass "" through — each
+	// backend omits `--model` from the CLI invocation, so the
+	// provider picks its own default (Claude Code's shipped
+	// default, codex app-server's account-scoped default, etc.).
+	// Baking a Go-side "recommended default" here is how the
+	// cursor regression happened — static guesses drift from
+	// whatever the upstream CLI actually accepts.
+	model := ""
+	if task.Agent != nil && task.Agent.Model != "" {
+		model = task.Agent.Model
+	}
+	if model == "" {
+		model = entry.Model
+	}
 	execOpts := agent.ExecOptions{
 		Cwd:             env.WorkDir,
-		Model:           entry.Model,
+		Model:           model,
 		Timeout:         d.cfg.AgentTimeout,
 		ResumeSessionID: task.PriorSessionID,
+		CustomArgs:      customArgs,
+		McpConfig:       mcpConfig,
+	}
+	// openclaw loads its bootstrap files (AGENTS.md, SOUL.md, ...) from its own
+	// workspace dir rather than the task workdir, so the AGENTS.md written by
+	// execenv.InjectRuntimeConfig is never read. Pass agent instructions inline
+	// via SystemPrompt so the backend can prepend them to the --message payload.
+	// Other providers already surface instructions through their runtime config
+	// file and don't need this.
+	if provider == "openclaw" {
+		execOpts.SystemPrompt = instructions
 	}
 
 	result, tools, err := d.executeAndDrain(ctx, backend, prompt, execOpts, taskLog, task.ID)
@@ -971,7 +1227,17 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	switch result.Status {
 	case "completed":
 		if result.Output == "" {
-			return TaskResult{}, fmt.Errorf("%s returned empty output", provider)
+			// Even an empty-output completion may have established a real
+			// session — surface it through the blocked path so the next chat
+			// turn can still resume from where this one left off.
+			return TaskResult{
+				Status:    "blocked",
+				Comment:   fmt.Sprintf("%s returned empty output", provider),
+				SessionID: result.SessionID,
+				WorkDir:   env.WorkDir,
+				EnvRoot:   env.RootDir,
+				Usage:     usageEntries,
+			}, nil
 		}
 		return TaskResult{
 			Status:    "completed",
@@ -982,13 +1248,36 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 			Usage:     usageEntries,
 		}, nil
 	case "timeout":
-		return TaskResult{}, fmt.Errorf("%s timed out after %s", provider, d.cfg.AgentTimeout)
+		// Surface session_id/work_dir so the chat resume pointer is kept
+		// in sync even when the agent times out after building a session.
+		// We mark as "blocked" (not a hard error return) so handleTask
+		// goes through the FailTask path that forwards session info.
+		return TaskResult{
+			Status:    "blocked",
+			Comment:   fmt.Sprintf("%s timed out after %s", provider, d.cfg.AgentTimeout),
+			SessionID: result.SessionID,
+			WorkDir:   env.WorkDir,
+			EnvRoot:   env.RootDir,
+			Usage:     usageEntries,
+		}, nil
 	default:
 		errMsg := result.Error
 		if errMsg == "" {
 			errMsg = fmt.Sprintf("%s execution %s", provider, result.Status)
 		}
-		return TaskResult{Status: "blocked", Comment: errMsg, EnvRoot: env.RootDir, Usage: usageEntries}, nil
+		// Forward SessionID/WorkDir on the blocked path: backends commonly
+		// emit a real session_id before failing (rate-limit, tool error,
+		// model reject, …). Without this the chat_session resume pointer
+		// would either be left stale or overwritten with NULL on the
+		// server, causing the next chat turn to lose context.
+		return TaskResult{
+			Status:    "blocked",
+			Comment:   errMsg,
+			SessionID: result.SessionID,
+			WorkDir:   env.WorkDir,
+			EnvRoot:   env.RootDir,
+			Usage:     usageEntries,
+		}, nil
 	}
 }
 
@@ -1068,6 +1357,7 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 			}
 		}()
 
+		var sessionPinned atomic.Bool
 		for {
 			select {
 			case msg, ok := <-session.Messages:
@@ -1075,6 +1365,22 @@ func (d *Daemon) executeAndDrain(ctx context.Context, backend agent.Backend, pro
 					goto drainDone
 				}
 				switch msg.Type {
+				case agent.MessageStatus:
+					// Persist the session/work_dir as soon as the backend
+					// reveals them. Without this, a daemon crash mid-run
+					// loses the resume pointer and the auto-retry fires
+					// without context.
+					if msg.SessionID != "" && !sessionPinned.Swap(true) {
+						sid := msg.SessionID
+						wd := opts.Cwd
+						go func() {
+							pinCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+							defer cancel()
+							if err := d.client.PinTaskSession(pinCtx, taskID, sid, wd); err != nil {
+								taskLog.Debug("pin session failed", "error", err)
+							}
+						}()
+					}
 				case agent.MessageToolUse:
 					n := toolCount.Add(1)
 					taskLog.Info(fmt.Sprintf("tool #%d: %s", n, msg.Tool))

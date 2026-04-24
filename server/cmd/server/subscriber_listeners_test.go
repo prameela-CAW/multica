@@ -16,13 +16,17 @@ import (
 // (testPool, testUserID, testWorkspaceID are set in integration_test.go).
 
 // createTestIssue inserts a minimal issue and returns its UUID string.
+// Picks the next per-workspace number to avoid colliding with the
+// uq_issue_workspace_number unique constraint when a single test creates
+// multiple issues.
 func createTestIssue(t *testing.T, workspaceID, creatorID string) string {
 	t.Helper()
 	ctx := context.Background()
 	var issueID string
 	err := testPool.QueryRow(ctx, `
-		INSERT INTO issue (workspace_id, title, status, priority, creator_type, creator_id, position)
-		VALUES ($1, 'subscriber test issue', 'todo', 'medium', 'member', $2, 0)
+		INSERT INTO issue (workspace_id, title, status, priority, creator_type, creator_id, position, number)
+		VALUES ($1, 'subscriber test issue', 'todo', 'medium', 'member', $2, 0,
+		        (SELECT COALESCE(MAX(number), 0) + 1 FROM issue WHERE workspace_id = $1))
 		RETURNING id
 	`, workspaceID, creatorID).Scan(&issueID)
 	if err != nil {
@@ -354,6 +358,39 @@ func TestSubscriberAddedEventPublished(t *testing.T) {
 	}
 	if payload["user_id"] != testUserID {
 		t.Fatalf("expected user_id %s, got %v", testUserID, payload["user_id"])
+	}
+}
+
+// Autopilot publishes EventIssueCreated with a map[string]any payload (not handler.IssueResponse).
+// The listener must still subscribe the creator.
+func TestSubscriberIssueCreated_AutopilotMapPayload(t *testing.T) {
+	queries := db.New(testPool)
+	bus := events.New()
+	registerSubscriberListeners(bus, queries)
+
+	issueID := createTestIssue(t, testWorkspaceID, testUserID)
+	t.Cleanup(func() { cleanupTestIssue(t, issueID) })
+
+	bus.Publish(events.Event{
+		Type:        protocol.EventIssueCreated,
+		WorkspaceID: testWorkspaceID,
+		ActorType:   "member",
+		ActorID:     testUserID,
+		Payload: map[string]any{
+			"issue": map[string]any{
+				"id":           issueID,
+				"workspace_id": testWorkspaceID,
+				"title":        "autopilot test issue",
+				"status":       "todo",
+				"priority":     "medium",
+				"creator_type": "member",
+				"creator_id":   testUserID,
+			},
+		},
+	})
+
+	if !isSubscribed(t, queries, issueID, "member", testUserID) {
+		t.Fatal("expected creator to be subscribed when autopilot publishes map payload")
 	}
 }
 

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +14,68 @@ import (
 	"sync"
 	"time"
 )
+
+// codexBlockedArgs are flags hardcoded by the daemon that must not be
+// overridden by user-configured custom_args.
+var codexBlockedArgs = map[string]blockedArgMode{
+	"--listen": blockedWithValue, // stdio:// transport for daemon communication
+}
+
+// codexStderrTailBytes bounds the stderr tail captured for inclusion in
+// error messages when codex exits before the JSON-RPC handshake (e.g. the
+// user supplied a custom_args flag that the `app-server` subcommand
+// rejects). Large enough to contain typical CLI error lines, small enough
+// to stay sensible inside a task-level Result.Error string.
+const codexStderrTailBytes = 2048
+
+// stderrTail forwards writes to an inner writer (typically the daemon's
+// log) while also retaining a bounded tail of the bytes written. Consumers
+// call Tail() to include that context in error messages when the codex
+// process exits before we can read a structured JSON-RPC error — otherwise
+// all the user sees is "codex process exited", with the real reason stuck
+// in daemon logs.
+type stderrTail struct {
+	inner io.Writer
+	max   int
+
+	mu  sync.Mutex
+	buf []byte
+}
+
+func newStderrTail(inner io.Writer, max int) *stderrTail {
+	return &stderrTail{inner: inner, max: max}
+}
+
+func (s *stderrTail) Write(p []byte) (int, error) {
+	if _, err := s.inner.Write(p); err != nil {
+		return 0, err
+	}
+	s.mu.Lock()
+	s.buf = append(s.buf, p...)
+	if len(s.buf) > s.max {
+		s.buf = s.buf[len(s.buf)-s.max:]
+	}
+	s.mu.Unlock()
+	return len(p), nil
+}
+
+// Tail returns the captured stderr with leading/trailing whitespace
+// trimmed; empty string means nothing was written or everything was
+// whitespace.
+func (s *stderrTail) Tail() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return strings.TrimSpace(string(s.buf))
+}
+
+// withCodexStderr appends a stderr tail hint to an error message when
+// non-empty, otherwise returns msg unchanged.
+func withCodexStderr(msg, tail string) string {
+	if tail == "" {
+		return msg
+	}
+	return msg + "; codex stderr: " + tail
+}
 
 // codexBackend implements Backend by spawning `codex app-server --listen stdio://`
 // and communicating via JSON-RPC 2.0 over stdin/stdout.
@@ -34,7 +98,10 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 	}
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 
-	cmd := exec.CommandContext(runCtx, execPath, "app-server", "--listen", "stdio://")
+	codexArgs := append([]string{"app-server", "--listen", "stdio://"}, filterCustomArgs(opts.CustomArgs, codexBlockedArgs, b.cfg.Logger)...)
+	cmd := exec.CommandContext(runCtx, execPath, codexArgs...)
+	hideAgentWindow(cmd)
+	b.cfg.Logger.Info("agent command", "exec", execPath, "args", codexArgs)
 	if opts.Cwd != "" {
 		cmd.Dir = opts.Cwd
 	}
@@ -50,7 +117,8 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		cancel()
 		return nil, fmt.Errorf("codex stdin pipe: %w", err)
 	}
-	cmd.Stderr = newLogWriter(b.cfg.Logger, "[codex:stderr] ")
+	stderrBuf := newStderrTail(newLogWriter(b.cfg.Logger, "[codex:stderr] "), codexStderrTailBytes)
+	cmd.Stderr = stderrBuf
 
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -106,6 +174,22 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		c.closeAllPending(fmt.Errorf("codex process exited"))
 	}()
 
+	// drainAndWait closes stdin so codex shuts down, then joins cmd.Wait().
+	// cmd.Wait() is the only Go-stdlib-documented synchronization point for
+	// os/exec's internal stderr/stdout copy goroutines — until it returns,
+	// stderrBuf may not have observed every byte codex wrote before it
+	// exited, and stderrBuf.Tail() can come back empty or truncated. Any
+	// code that reads stderrBuf.Tail() must call drainAndWait() first.
+	// sync.Once makes it safe to call from both error paths and the deferred
+	// cleanup.
+	var waitOnce sync.Once
+	drainAndWait := func() {
+		waitOnce.Do(func() {
+			stdin.Close()
+			_ = cmd.Wait()
+		})
+	}
+
 	// Drive the session lifecycle in a goroutine.
 	// Shutdown sequence: lifecycle goroutine closes stdin + cancels context →
 	// codex process exits → reader goroutine's scanner.Scan() returns false →
@@ -114,10 +198,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		defer cancel()
 		defer close(msgCh)
 		defer close(resCh)
-		defer func() {
-			stdin.Close()
-			_ = cmd.Wait()
-		}()
+		defer drainAndWait()
 
 		startTime := time.Now()
 		finalStatus := "completed"
@@ -135,45 +216,31 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			},
 		})
 		if err != nil {
+			drainAndWait() // flush os/exec stderr goroutine before sampling Tail
 			finalStatus = "failed"
-			finalError = fmt.Sprintf("codex initialize failed: %v", err)
+			finalError = withCodexStderr(fmt.Sprintf("codex initialize failed: %v", err), stderrBuf.Tail())
 			resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
 			return
 		}
 		c.notify("initialized")
 
-		// 2. Start thread
-		threadResult, err := c.request(runCtx, "thread/start", map[string]any{
-			"model":                    nilIfEmpty(opts.Model),
-			"modelProvider":            nil,
-			"profile":                  nil,
-			"cwd":                      opts.Cwd,
-			"approvalPolicy":           nil,
-			"sandbox":                  nil,
-			"config":                   nil,
-			"baseInstructions":         nil,
-			"developerInstructions":    nilIfEmpty(opts.SystemPrompt),
-			"compactPrompt":            nil,
-			"includeApplyPatchTool":    nil,
-			"experimentalRawEvents":    false,
-			"persistExtendedHistory":   true,
-		})
+		// 2. Start a new thread, or resume the prior one for this issue. When
+		// resume fails (thread GCed on the server, schema drift, etc.) we fall
+		// back to a fresh thread so the task still makes progress.
+		threadID, resumed, err := c.startOrResumeThread(runCtx, opts, b.cfg.Logger)
 		if err != nil {
+			drainAndWait() // flush os/exec stderr goroutine before sampling Tail
 			finalStatus = "failed"
-			finalError = fmt.Sprintf("codex thread/start failed: %v", err)
-			resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
-			return
-		}
-
-		threadID := extractThreadID(threadResult)
-		if threadID == "" {
-			finalStatus = "failed"
-			finalError = "codex thread/start returned no thread ID"
+			finalError = withCodexStderr(err.Error(), stderrBuf.Tail())
 			resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
 			return
 		}
 		c.threadID = threadID
-		b.cfg.Logger.Info("codex thread started", "thread_id", threadID)
+		if resumed {
+			b.cfg.Logger.Info("codex thread resumed", "thread_id", threadID)
+		} else {
+			b.cfg.Logger.Info("codex thread started", "thread_id", threadID)
+		}
 
 		// 3. Send turn and wait for completion
 		_, err = c.request(runCtx, "turn/start", map[string]any{
@@ -183,8 +250,9 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			},
 		})
 		if err != nil {
+			drainAndWait() // flush os/exec stderr goroutine before sampling Tail
 			finalStatus = "failed"
-			finalError = fmt.Sprintf("codex turn/start failed: %v", err)
+			finalError = withCodexStderr(fmt.Sprintf("codex turn/start failed: %v", err), stderrBuf.Tail())
 			resCh <- Result{Status: finalStatus, Error: finalError, DurationMs: time.Since(startTime).Milliseconds()}
 			return
 		}
@@ -192,9 +260,15 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 		// Wait for turn completion or context cancellation
 		select {
 		case aborted := <-turnDone:
-			if aborted {
+			switch {
+			case aborted:
 				finalStatus = "aborted"
 				finalError = "turn was aborted"
+			default:
+				if errMsg := c.getTurnError(); errMsg != "" {
+					finalStatus = "failed"
+					finalError = errMsg
+				}
 			}
 		case <-runCtx.Done():
 			if runCtx.Err() == context.DeadlineExceeded {
@@ -252,6 +326,7 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 			Status:     finalStatus,
 			Output:     finalOutput,
 			Error:      finalError,
+			SessionID:  threadID,
 			DurationMs: duration.Milliseconds(),
 			Usage:      usageMap,
 		}
@@ -260,17 +335,69 @@ func (b *codexBackend) Execute(ctx context.Context, prompt string, opts ExecOpti
 	return &Session{Messages: msgCh, Result: resCh}, nil
 }
 
+// startOrResumeThread picks between Codex's thread/resume and thread/start
+// based on opts.ResumeSessionID. When a prior thread ID is provided it first
+// tries thread/resume; any error (unknown thread, schema mismatch, transport
+// failure) is logged and the method falls back to thread/start so the task
+// still executes. The returned threadID is what subsequent turn/start calls
+// must reference, and resumed indicates whether the prior thread was picked
+// up (only useful for logging).
+func (c *codexClient) startOrResumeThread(ctx context.Context, opts ExecOptions, logger *slog.Logger) (string, bool, error) {
+	if priorThreadID := opts.ResumeSessionID; priorThreadID != "" {
+		// thread/resume reuses the thread's persisted model and reasoning
+		// effort; only override fields the daemon actually cares about.
+		resumeResult, err := c.request(ctx, "thread/resume", map[string]any{
+			"threadId":              priorThreadID,
+			"cwd":                   opts.Cwd,
+			"model":                 nilIfEmpty(opts.Model),
+			"developerInstructions": nilIfEmpty(opts.SystemPrompt),
+		})
+		if err == nil {
+			if threadID := extractThreadID(resumeResult); threadID != "" {
+				return threadID, true, nil
+			}
+			logger.Warn("codex thread/resume returned no thread ID; falling back to thread/start", "prior_thread_id", priorThreadID)
+		} else {
+			logger.Warn("codex thread/resume failed; falling back to thread/start", "prior_thread_id", priorThreadID, "error", err)
+		}
+	}
+
+	startResult, err := c.request(ctx, "thread/start", map[string]any{
+		"model":                  nilIfEmpty(opts.Model),
+		"modelProvider":          nil,
+		"profile":                nil,
+		"cwd":                    opts.Cwd,
+		"approvalPolicy":         nil,
+		"sandbox":                nil,
+		"config":                 nil,
+		"baseInstructions":       nil,
+		"developerInstructions":  nilIfEmpty(opts.SystemPrompt),
+		"compactPrompt":          nil,
+		"includeApplyPatchTool":  nil,
+		"experimentalRawEvents":  false,
+		"persistExtendedHistory": true,
+	})
+	if err != nil {
+		return "", false, fmt.Errorf("codex thread/start failed: %w", err)
+	}
+	threadID := extractThreadID(startResult)
+	if threadID == "" {
+		return "", false, fmt.Errorf("codex thread/start returned no thread ID")
+	}
+	return threadID, false, nil
+}
+
 // ── codexClient: JSON-RPC 2.0 transport ──
 
 type codexClient struct {
-	cfg       Config
-	stdin     interface{ Write([]byte) (int, error) }
-	mu        sync.Mutex
-	nextID    int
-	pending   map[int]*pendingRPC
-	threadID  string
-	turnID    string
-	onMessage func(Message)
+	cfg        Config
+	stdin      interface{ Write([]byte) (int, error) }
+	mu         sync.Mutex
+	nextID     int
+	pending    map[int]*pendingRPC
+	threadID   string
+	turnID     string
+	onMessage  func(Message)
 	onTurnDone func(aborted bool)
 
 	notificationProtocol string // "unknown", "legacy", "raw"
@@ -279,6 +406,26 @@ type codexClient struct {
 
 	usageMu sync.Mutex
 	usage   TokenUsage // accumulated from turn events
+
+	turnErrorMu sync.Mutex
+	turnError   string // captured from turn/completed status=failed or terminal error notifications
+}
+
+func (c *codexClient) setTurnError(msg string) {
+	if msg == "" {
+		return
+	}
+	c.turnErrorMu.Lock()
+	defer c.turnErrorMu.Unlock()
+	if c.turnError == "" {
+		c.turnError = msg
+	}
+}
+
+func (c *codexClient) getTurnError() string {
+	c.turnErrorMu.Lock()
+	defer c.turnErrorMu.Unlock()
+	return c.turnError
 }
 
 type pendingRPC struct {
@@ -482,7 +629,7 @@ func (c *codexClient) handleEvent(msg map[string]any) {
 	case "task_started":
 		c.turnStarted = true
 		if c.onMessage != nil {
-			c.onMessage(Message{Type: MessageStatus, Status: "running"})
+			c.onMessage(Message{Type: MessageStatus, Status: "running", SessionID: c.threadID})
 		}
 	case "agent_message":
 		text, _ := msg["message"].(string)
@@ -543,6 +690,19 @@ func (c *codexClient) handleEvent(msg map[string]any) {
 }
 
 func (c *codexClient) handleRawNotification(method string, params map[string]any) {
+	// Ignore notifications from threads other than the one we are tracking.
+	// Codex multiplexes subagent threads (e.g. memory consolidation) on the
+	// same stdio pipe; only our thread should drive turn lifecycle and output.
+	//
+	// The v2 app-server-protocol schema guarantees a top-level threadId on
+	// every notification, so this dispatch-level guard transparently covers
+	// every handler below. If a future codex revision introduces notifications
+	// without threadId, they fall through (ok=false) — re-audit this guard
+	// when bumping codex.
+	if threadID, ok := params["threadId"].(string); ok && c.threadID != "" && threadID != c.threadID {
+		return
+	}
+
 	switch method {
 	case "turn/started":
 		c.turnStarted = true
@@ -550,7 +710,7 @@ func (c *codexClient) handleRawNotification(method string, params map[string]any
 			c.turnID = turnID
 		}
 		if c.onMessage != nil {
-			c.onMessage(Message{Type: MessageStatus, Status: "running"})
+			c.onMessage(Message{Type: MessageStatus, Status: "running", SessionID: c.threadID})
 		}
 
 	case "turn/completed":
@@ -558,6 +718,16 @@ func (c *codexClient) handleRawNotification(method string, params map[string]any
 		status := extractNestedString(params, "turn", "status")
 		aborted := status == "cancelled" || status == "canceled" ||
 			status == "aborted" || status == "interrupted"
+
+		// Capture the error message from failed turns so callers can surface
+		// a real reason instead of falling back to "empty output".
+		if status == "failed" {
+			errMsg := extractNestedString(params, "turn", "error", "message")
+			if errMsg == "" {
+				errMsg = "codex turn failed"
+			}
+			c.setTurnError(errMsg)
+		}
 
 		if c.completedTurnIDs == nil {
 			c.completedTurnIDs = map[string]bool{}
@@ -576,6 +746,22 @@ func (c *codexClient) handleRawNotification(method string, params map[string]any
 
 		if c.onTurnDone != nil {
 			c.onTurnDone(aborted)
+		}
+
+	case "error":
+		// Top-level protocol error. Retrying notifications (willRetry=true) are
+		// transient reconnect attempts; only capture terminal errors so we
+		// don't stomp on a real failure later with a retry placeholder.
+		willRetry, _ := params["willRetry"].(bool)
+		errMsg := extractNestedString(params, "error", "message")
+		if errMsg == "" {
+			errMsg = extractNestedString(params, "message")
+		}
+		if errMsg != "" {
+			c.cfg.Logger.Warn("codex error notification", "message", errMsg, "will_retry", willRetry)
+			if !willRetry {
+				c.setTurnError(errMsg)
+			}
 		}
 
 	case "thread/status/changed":

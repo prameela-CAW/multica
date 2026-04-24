@@ -12,6 +12,7 @@ import {
   MoreHorizontal,
   Settings,
   KeyRound,
+  Terminal,
 } from "lucide-react";
 import type { Agent, RuntimeDevice, MemberWithUser } from "@multica/core/types";
 import {
@@ -36,18 +37,20 @@ import { SkillsTab } from "./tabs/skills-tab";
 import { TasksTab } from "./tabs/tasks-tab";
 import { SettingsTab } from "./tabs/settings-tab";
 import { EnvTab } from "./tabs/env-tab";
+import { CustomArgsTab } from "./tabs/custom-args-tab";
 
 function getRuntimeDevice(agent: Agent, runtimes: RuntimeDevice[]): RuntimeDevice | undefined {
   return runtimes.find((runtime) => runtime.id === agent.runtime_id);
 }
 
-type DetailTab = "instructions" | "skills" | "tasks" | "env" | "settings";
+type DetailTab = "instructions" | "skills" | "tasks" | "env" | "custom_args" | "settings";
 
 const detailTabs: { id: DetailTab; label: string; icon: typeof FileText }[] = [
   { id: "instructions", label: "Instructions", icon: FileText },
   { id: "skills", label: "Skills", icon: BookOpenText },
   { id: "tasks", label: "Tasks", icon: ListTodo },
   { id: "env", label: "Environment", icon: KeyRound },
+  { id: "custom_args", label: "Custom Args", icon: Terminal },
   { id: "settings", label: "Settings", icon: Settings },
 ];
 
@@ -89,7 +92,7 @@ export function AgentDetail({
 
       {/* Header */}
       <div className="flex h-12 shrink-0 items-center gap-3 border-b px-4">
-        <ActorAvatar actorType="agent" actorId={agent.id} size={28} className={`rounded-md ${isArchived ? "opacity-50" : ""}`} />
+        <ActorAvatar actorType="agent" actorId={agent.id} size={28} className={`rounded-md ${isArchived ? "opacity-50" : ""}`} disableHoverCard />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h2 className={`text-sm font-semibold truncate ${isArchived ? "text-muted-foreground" : ""}`}>{agent.name}</h2>
@@ -168,6 +171,14 @@ export function AgentDetail({
         {activeTab === "env" && (
           <EnvTab
             agent={agent}
+            readOnly={agent.custom_env_redacted}
+            onSave={(updates) => onUpdate(agent.id, updates)}
+          />
+        )}
+        {activeTab === "custom_args" && (
+          <CustomArgsTab
+            agent={agent}
+            runtimeDevice={runtimeDevice}
             onSave={(updates) => onUpdate(agent.id, updates)}
           />
         )}

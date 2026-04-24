@@ -17,6 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -70,7 +71,7 @@ func TestMain(m *testing.M) {
 
 	bus := events.New()
 	registerListeners(bus, hub)
-	router := NewRouter(pool, hub, bus)
+	router := NewRouter(pool, hub, bus, analytics.NoopClient{}, nil)
 	testServer = httptest.NewServer(router)
 
 	// Generate a JWT token directly for the test user
@@ -221,6 +222,23 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestConfigRouteIsPublic(t *testing.T) {
+	resp, err := http.Get(testServer.URL + "/api/config")
+	if err != nil {
+		t.Fatalf("config request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, body)
+	}
+
+	var result struct {
+		CdnDomain string `json:"cdn_domain"`
+	}
+	readJSON(t, resp, &result)
+}
+
 // ---- Auth ----
 
 func TestSendCodeAndVerify(t *testing.T) {
@@ -347,7 +365,7 @@ func TestVerifyCodeNewUserHasNoWorkspace(t *testing.T) {
 	}
 	readJSON(t, resp, &loginResp)
 
-	// New users should have no workspaces (onboarding creates one)
+	// New users should have no workspaces (/workspaces/new creates one)
 	req, _ := http.NewRequest("GET", testServer.URL+"/api/workspaces", nil)
 	req.Header.Set("Authorization", "Bearer "+loginResp.Token)
 	workspacesResp, err := http.DefaultClient.Do(req)

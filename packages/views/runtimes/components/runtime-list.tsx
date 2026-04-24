@@ -1,4 +1,4 @@
-import { Server, ArrowUpCircle, ChevronDown, Check } from "lucide-react";
+import { Server, ArrowUpCircle, ChevronDown, Check, Loader2 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import type { AgentRuntime, MemberWithUser } from "@multica/core/types";
 import { useWorkspaceId } from "@multica/core/hooks";
@@ -11,6 +11,7 @@ import {
   DropdownMenuSeparator,
 } from "@multica/ui/components/ui/dropdown-menu";
 import { ActorAvatar } from "../../common/actor-avatar";
+import { PageHeader } from "../../layout/page-header";
 import { ProviderLogo } from "./provider-logo";
 
 type RuntimeFilter = "mine" | "all";
@@ -80,6 +81,7 @@ export function RuntimeList({
   ownerFilter,
   onOwnerFilterChange,
   updatableIds,
+  bootstrapping,
 }: {
   runtimes: AgentRuntime[];
   selectedId: string;
@@ -89,6 +91,15 @@ export function RuntimeList({
   ownerFilter: string | null;
   onOwnerFilterChange: (ownerId: string | null) => void;
   updatableIds?: Set<string>;
+  /**
+   * When true and no runtimes are visible, the empty state renders a
+   * "starting" indicator instead of the static "register a runtime"
+   * hint. The desktop shell sets this while its bundled daemon is
+   * still booting / registering — without the hint, users see a
+   * misleading "no runtimes" message during the few seconds between
+   * page load and daemon registration. Web leaves this undefined.
+   */
+  bootstrapping?: boolean;
 }) {
   const wsId = useWorkspaceId();
   const { data: members = [] } = useQuery(memberListOptions(wsId));
@@ -120,13 +131,13 @@ export function RuntimeList({
 
   return (
     <div className="overflow-y-auto h-full border-r">
-      <div className="flex h-12 items-center justify-between border-b px-4">
+      <PageHeader className="justify-between">
         <h1 className="text-sm font-semibold">Runtimes</h1>
         <span className="text-xs text-muted-foreground">
           {filteredRuntimes.filter((r) => r.status === "online").length}/
           {filteredRuntimes.length} online
         </span>
-      </div>
+      </PageHeader>
 
       {/* Filter bar */}
       <div className="flex items-center justify-between border-b px-4 py-2">
@@ -201,19 +212,31 @@ export function RuntimeList({
       </div>
 
       {filteredRuntimes.length === 0 ? (
-        <div className="flex flex-col items-center justify-center px-4 py-12">
-          <Server className="h-8 w-8 text-muted-foreground/40" />
-          <p className="mt-3 text-sm text-muted-foreground">
-            {filter === "mine" ? "No runtimes owned by you" : ownerFilter ? "No runtimes for this owner" : "No runtimes registered"}
-          </p>
-          <p className="mt-1 text-xs text-muted-foreground text-center">
-            Run{" "}
-            <code className="rounded bg-muted px-1 py-0.5">
-              multica daemon start
-            </code>{" "}
-            to register a local runtime.
-          </p>
-        </div>
+        bootstrapping ? (
+          <div className="flex flex-col items-center justify-center px-4 py-12">
+            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground/60" />
+            <p className="mt-3 text-sm text-muted-foreground">
+              Starting local runtime…
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground text-center">
+              This usually takes a few seconds.
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center px-4 py-12">
+            <Server className="h-8 w-8 text-muted-foreground/40" />
+            <p className="mt-3 text-sm text-muted-foreground">
+              {filter === "mine" ? "No runtimes owned by you" : ownerFilter ? "No runtimes for this owner" : "No runtimes registered"}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground text-center">
+              Run{" "}
+              <code className="rounded bg-muted px-1 py-0.5">
+                multica daemon start
+              </code>{" "}
+              to register a local runtime.
+            </p>
+          </div>
+        )
       ) : (
         <div className="divide-y">
           {filteredRuntimes.map((runtime) => (

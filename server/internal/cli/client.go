@@ -9,9 +9,37 @@ import (
 	"mime/multipart"
 	"net/http"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
+
+// ClientVersion is the CLI version sent on every request as X-Client-Version.
+// Set by the multica binary at init() so the package doesn't depend on the
+// concrete cmd package. Defaults to "dev" when running unset (e.g. tests).
+var ClientVersion = "dev"
+
+// ClientPlatform identifies this client to the server. Override for tests
+// or alternative entry points; defaults to "cli".
+var ClientPlatform = "cli"
+
+// ClientOS is the normalized operating system string sent as X-Client-OS.
+// Computed once from runtime.GOOS so the server doesn't need to reverse-map
+// Go's os names ("darwin"/"windows"/"linux") into the protocol vocabulary.
+var ClientOS = normalizeGOOS(runtime.GOOS)
+
+func normalizeGOOS(goos string) string {
+	switch goos {
+	case "darwin":
+		return "macos"
+	case "windows":
+		return "windows"
+	case "linux":
+		return "linux"
+	default:
+		return goos
+	}
+}
 
 // APIClient is a REST client for the Multica server API.
 // Used by ctrl subcommands (agent, runtime, status, etc.). Requests
@@ -23,6 +51,12 @@ type APIClient struct {
 	AgentID     string // When set, requests are attributed to this agent instead of the user.
 	TaskID      string // When set, sent as X-Task-ID for agent-task validation.
 	HTTPClient  *http.Client
+
+	// Identity overrides. Empty values fall back to the package-level
+	// ClientPlatform / ClientVersion / ClientOS.
+	Platform string
+	Version  string
+	OS       string
 }
 
 // NewAPIClient creates a new API client for ctrl commands.
@@ -47,6 +81,28 @@ func (c *APIClient) setHeaders(req *http.Request) {
 	}
 	if c.TaskID != "" {
 		req.Header.Set("X-Task-ID", c.TaskID)
+	}
+
+	platform := c.Platform
+	if platform == "" {
+		platform = ClientPlatform
+	}
+	if platform != "" {
+		req.Header.Set("X-Client-Platform", platform)
+	}
+	version := c.Version
+	if version == "" {
+		version = ClientVersion
+	}
+	if version != "" {
+		req.Header.Set("X-Client-Version", version)
+	}
+	osName := c.OS
+	if osName == "" {
+		osName = ClientOS
+	}
+	if osName != "" {
+		req.Header.Set("X-Client-OS", osName)
 	}
 }
 
@@ -176,6 +232,36 @@ func (c *APIClient) PutJSON(ctx context.Context, path string, body any, out any)
 	if resp.StatusCode >= 400 {
 		respData, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("PUT %s returned %d: %s", path, resp.StatusCode, strings.TrimSpace(string(respData)))
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// PatchJSON performs a PATCH request with a JSON body.
+func (c *APIClient) PatchJSON(ctx context.Context, path string, body any, out any) error {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, c.BaseURL+path, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	c.setHeaders(req)
+
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respData, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("PATCH %s returned %d: %s", path, resp.StatusCode, strings.TrimSpace(string(respData)))
 	}
 	if out == nil {
 		return nil
