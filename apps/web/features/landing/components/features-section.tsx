@@ -396,8 +396,8 @@ const mockToolCalls = [
   { type: "thinking" as const, content: "Now checking handler/comment.go for the same inconsistent patterns…" },
   { type: "tool_use" as const, tool: "Read", summary: "server/internal/handler/comment.go" },
   { type: "tool_result" as const, preview: "func (h *CommentHandler) Create(w http.ResponseWriter, r *http.Request) { …" },
-  { type: "tool_use" as const, tool: "Bash", summary: "go test ./internal/handler/ -run TestErrorResponses" },
-  { type: "tool_result" as const, preview: "ok  \tgithub.com/multica/server/internal/handler\t0.847s" },
+  { type: "tool_use" as const, tool: "Validate", summary: "Run handler test suite" },
+  { type: "tool_result" as const, preview: "All checks passed in 0.847s" },
 ];
 
 const mockTaskHistory = [

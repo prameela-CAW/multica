@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
+import { useAuthStore } from "@multica/core/auth";
 import { useLocale } from "../i18n";
-import { GitHubMark, githubUrl } from "./shared";
 
 export function OpenSourceSection() {
   const { t } = useLocale();
+  const user = useAuthStore((s) => s.user);
 
   return (
     <section id="open-source" className="bg-white text-[#0a0d12]">
@@ -26,13 +27,10 @@ export function OpenSourceSection() {
             </p>
             <div className="mt-8 flex flex-wrap items-center gap-3">
               <Link
-                href={githubUrl}
-                target="_blank"
-                rel="noreferrer"
+                href={user ? "/" : "/login"}
                 className="inline-flex items-center justify-center gap-2.5 rounded-[12px] bg-[#0a0d12] px-5 py-3 text-[14px] font-semibold text-white transition-colors hover:bg-[#0a0d12]/88"
               >
-                <GitHubMark className="size-4" />
-                {t.openSource.cta}
+                {user ? t.header.dashboard : t.header.login}
               </Link>
             </div>
           </div>

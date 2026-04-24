@@ -5,13 +5,16 @@ import { MulticaIcon } from "@multica/ui/components/common/multica-icon";
 import { cn } from "@multica/ui/lib/utils";
 import { useAuthStore } from "@multica/core/auth";
 import { captureDownloadIntent } from "@multica/core/analytics";
-import { XMark, GitHubMark, githubUrl, twitterUrl } from "./shared";
+import { XMark, githubUrl, twitterUrl } from "./shared";
 import { useLocale, locales, localeLabels } from "../i18n";
 
 export function LandingFooter() {
   const { t, locale, setLocale } = useLocale();
   const user = useAuthStore((s) => s.user);
-  const groups = Object.values(t.footer.groups);
+  const groups = Object.values(t.footer.groups).map((group) => ({
+    ...group,
+    links: group.links.filter((link) => link.href !== githubUrl),
+  }));
 
   return (
     <footer className="bg-[#0a0d12] text-white">
@@ -38,21 +41,13 @@ export function LandingFooter() {
               >
                 <XMark className="size-4" />
               </Link>
-              <Link
-                href={githubUrl}
-                target="_blank"
-                rel="noreferrer"
-                className="text-white/40 transition-colors hover:text-white"
-              >
-                <GitHubMark className="size-4" />
-              </Link>
             </div>
             <div className="mt-6">
               <Link
                 href={user ? "/" : "/login"}
                 className="inline-flex items-center justify-center rounded-[11px] bg-white px-5 py-2.5 text-[13px] font-semibold text-[#0a0d12] transition-colors hover:bg-white/88"
               >
-                {user ? t.header.dashboard : t.footer.cta}
+                {user ? t.header.dashboard : t.header.login}
               </Link>
             </div>
           </div>
