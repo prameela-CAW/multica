@@ -5,7 +5,7 @@ import { MulticaIcon } from "@multica/ui/components/common/multica-icon";
 import { cn } from "@multica/ui/lib/utils";
 import { useAuthStore } from "@multica/core/auth";
 import { useLocale } from "../i18n";
-import { GitHubMark, githubUrl, headerButtonClassName } from "./shared";
+import { headerButtonClassName } from "./shared";
 
 export function LandingHeader({
   variant = "dark",
@@ -44,15 +44,6 @@ export function LandingHeader({
         </Link>
 
         <div className="flex items-center gap-2.5 sm:gap-3">
-          <Link
-            href={githubUrl}
-            target="_blank"
-            rel="noreferrer"
-            className={headerButtonClassName("ghost", variant)}
-          >
-            <GitHubMark className="size-3.5" />
-            {t.header.github}
-          </Link>
           <Link
             href={user ? "/issues" : "/login"}
             className={headerButtonClassName("solid", variant)}

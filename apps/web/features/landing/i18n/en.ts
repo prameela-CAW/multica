@@ -13,7 +13,7 @@ export const en: LandingDict = {
     headlineLine2: "won\u2019t be human.",
     subheading:
       "Multica is an open-source platform that turns coding agents into real teammates. Assign tasks, track progress, compound skills \u2014 manage your human + agent workforce in one place.",
-    cta: "Start free trial",
+    cta: "Log in",
     worksWith: "Works with",
     imageAlt: "Multica board view \u2014 issues managed by humans and agents",
   },
