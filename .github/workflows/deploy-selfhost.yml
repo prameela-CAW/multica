@@ -1,0 +1,99 @@
+name: Deploy Self-Host
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-selfhost-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate deploy secrets
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "${DEPLOY_HOST}" ] || { echo "Missing secret: DEPLOY_HOST"; exit 1; }
+          [ -n "${DEPLOY_USER}" ] || { echo "Missing secret: DEPLOY_USER"; exit 1; }
+          [ -n "${DEPLOY_SSH_KEY}" ] || { echo "Missing secret: DEPLOY_SSH_KEY"; exit 1; }
+
+      - name: Prepare SSH key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          install -m 600 /dev/null ~/.ssh/deploy_key
+          printf '%s\n' "${DEPLOY_SSH_KEY}" > ~/.ssh/deploy_key
+
+      - name: Create deployment bundle
+        run: |
+          set -euo pipefail
+          tar \
+            --exclude-vcs \
+            --exclude=node_modules \
+            --exclude=.turbo \
+            --exclude=dist \
+            -czf /tmp/multica-deploy.tgz .
+
+      - name: Upload deployment bundle
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+        run: |
+          set -euo pipefail
+          scp \
+            -P "${DEPLOY_PORT}" \
+            -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=no \
+            /tmp/multica-deploy.tgz \
+            "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/multica-deploy.tgz"
+
+      - name: Deploy on server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/multica' }}
+          DEPLOY_HEALTHCHECK_URL: ${{ secrets.DEPLOY_HEALTHCHECK_URL }}
+        run: |
+          set -euo pipefail
+          ssh \
+            -p "${DEPLOY_PORT}" \
+            -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=no \
+            "${DEPLOY_USER}@${DEPLOY_HOST}" \
+            "set -euo pipefail
+            DEPLOY_PATH='${DEPLOY_PATH}'
+            ENV_BAK=''
+            mkdir -p \"\${DEPLOY_PATH}\"
+            if [ -f \"\${DEPLOY_PATH}/.env\" ]; then
+              ENV_BAK=\$(mktemp)
+              cp \"\${DEPLOY_PATH}/.env\" \"\${ENV_BAK}\"
+            fi
+            find \"\${DEPLOY_PATH}\" -mindepth 1 -maxdepth 1 ! -name '.env' -exec rm -rf {} +
+            tar -xzf /tmp/multica-deploy.tgz -C \"\${DEPLOY_PATH}\"
+            if [ -n \"\${ENV_BAK}\" ]; then
+              cp \"\${ENV_BAK}\" \"\${DEPLOY_PATH}/.env\"
+              rm -f \"\${ENV_BAK}\"
+            fi
+            cd \"\${DEPLOY_PATH}\"
+            docker compose -f docker-compose.selfhost.yml -f docker-compose.selfhost.build.yml up -d --build
+            docker compose -f docker-compose.selfhost.yml ps"
+
+          if [ -n "${DEPLOY_HEALTHCHECK_URL}" ]; then
+            curl --fail --show-error --silent "${DEPLOY_HEALTHCHECK_URL}" >/dev/null
+          fi
+
