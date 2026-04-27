@@ -4,7 +4,6 @@ import type { LandingDict } from "./types";
 export function createEnDict(allowSignup: boolean): LandingDict {
   return {
   header: {
-    github: "GitHub",
     login: "Log in",
     dashboard: "Dashboard",
   },

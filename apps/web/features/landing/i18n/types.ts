@@ -20,7 +20,7 @@ type FooterGroup = {
 };
 
 export type LandingDict = {
-  header: { github: string; login: string; dashboard: string };
+  header: { login: string; dashboard: string };
   hero: {
     headlineLine1: string;
     headlineLine2: string;

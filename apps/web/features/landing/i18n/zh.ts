@@ -4,7 +4,6 @@ import type { LandingDict } from "./types";
 export function createZhDict(allowSignup: boolean): LandingDict {
   return {
   header: {
-    github: "GitHub",
     login: "\u767b\u5f55",
     dashboard: "\u8fdb\u5165\u5de5\u4f5c\u53f0",
   },
