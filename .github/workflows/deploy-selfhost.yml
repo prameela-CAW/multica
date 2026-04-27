@@ -13,24 +13,25 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST || vars.DEPLOY_HOST || secrets.SSH_HOST || vars.SSH_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER || vars.DEPLOY_USER || secrets.SSH_USER || vars.SSH_USER }}
+      DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY || secrets.SSH_PRIVATE_KEY }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || vars.DEPLOY_PORT || '22' }}
+      DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || vars.DEPLOY_PATH || '/opt/multica' }}
+      DEPLOY_HEALTHCHECK_URL: ${{ secrets.DEPLOY_HEALTHCHECK_URL || vars.DEPLOY_HEALTHCHECK_URL }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Validate deploy secrets
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
           set -euo pipefail
-          [ -n "${DEPLOY_HOST}" ] || { echo "Missing secret: DEPLOY_HOST"; exit 1; }
-          [ -n "${DEPLOY_USER}" ] || { echo "Missing secret: DEPLOY_USER"; exit 1; }
-          [ -n "${DEPLOY_SSH_KEY}" ] || { echo "Missing secret: DEPLOY_SSH_KEY"; exit 1; }
+          [ -n "${DEPLOY_HOST}" ] || { echo "Missing deploy host: set secrets.DEPLOY_HOST, vars.DEPLOY_HOST, secrets.SSH_HOST, or vars.SSH_HOST"; exit 1; }
+          [ -n "${DEPLOY_USER}" ] || { echo "Missing deploy user: set secrets.DEPLOY_USER, vars.DEPLOY_USER, secrets.SSH_USER, or vars.SSH_USER"; exit 1; }
+          [ -n "${DEPLOY_SSH_KEY}" ] || { echo "Missing SSH key: set secrets.DEPLOY_SSH_KEY or secrets.SSH_PRIVATE_KEY"; exit 1; }
 
       - name: Prepare SSH key
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
           set -euo pipefail
           install -m 700 -d ~/.ssh
@@ -48,10 +49,6 @@ jobs:
             -czf /tmp/multica-deploy.tgz .
 
       - name: Upload deployment bundle
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
         run: |
           set -euo pipefail
           scp \
@@ -62,12 +59,6 @@ jobs:
             "${DEPLOY_USER}@${DEPLOY_HOST}:/tmp/multica-deploy.tgz"
 
       - name: Deploy on server
-        env:
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT || '22' }}
-          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH || '/opt/multica' }}
-          DEPLOY_HEALTHCHECK_URL: ${{ secrets.DEPLOY_HEALTHCHECK_URL }}
         run: |
           set -euo pipefail
           ssh \
@@ -96,4 +87,3 @@ jobs:
           if [ -n "${DEPLOY_HEALTHCHECK_URL}" ]; then
             curl --fail --show-error --silent "${DEPLOY_HEALTHCHECK_URL}" >/dev/null
           fi
-
