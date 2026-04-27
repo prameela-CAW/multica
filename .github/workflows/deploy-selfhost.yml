@@ -1,8 +1,9 @@
-name: Deploy Self-Host
+name: Deploy Self-Host v2
 
 on:
   push:
-    branches: [main]
+    branches:
+      - '**'
   workflow_dispatch:
 
 concurrency:
